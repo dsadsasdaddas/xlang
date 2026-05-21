@@ -148,6 +148,9 @@ pub enum Expr {
     Identifier {
         name: String,
     },
+    ArrayLiteral {
+        elements: Vec<Expr>,
+    },
     BinaryExpr {
         op: String,
         left: Box<Expr>,
