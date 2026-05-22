@@ -502,11 +502,28 @@ impl Parser {
                 self.expect(")")?;
                 Ok(expr)
             }
+            _ if tok.text == "[" => self.parse_array_literal(),
             _ => Err(XError::Parse(format!(
                 "expected expression, got {:?} at {}:{}:{}",
                 tok.text, self.file, tok.line, tok.col
             ))),
         }
+    }
+
+    fn parse_array_literal(&mut self) -> XResult<Expr> {
+        self.expect("[")?;
+        let mut elements = Vec::new();
+        if !self.check("]") {
+            elements.push(self.parse_expr()?);
+            while self.match_text(",") {
+                if self.check("]") {
+                    break;
+                }
+                elements.push(self.parse_expr()?);
+            }
+        }
+        self.expect("]")?;
+        Ok(Expr::ArrayLiteral { elements })
     }
 }
 

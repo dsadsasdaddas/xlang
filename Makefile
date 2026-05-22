@@ -1,4 +1,4 @@
-.PHONY: check ast-if c-loop c-array-type run-if clean
+.PHONY: check ast-if c-loop c-array-type run-array-literal run-if clean
 
 check:
 	cargo run --quiet --bin xlangc -- check examples/*.x
@@ -13,6 +13,9 @@ c-loop:
 c-array-type:
 	cargo run --quiet --bin xlangc -- c examples/array_type.x
 	cc -c build/array_type.c -o build/array_type.o
+
+run-array-literal:
+	cargo run --quiet --bin xlangc -- run examples/array_literal.x
 
 run-if:
 	cargo run --quiet --bin xlangc -- run examples/if_else.x

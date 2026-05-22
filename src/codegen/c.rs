@@ -321,15 +321,7 @@ impl CGen {
         match stmt {
             Stmt::LetStmt {
                 name, ty, value, ..
-            } => {
-                self.emit(&format!(
-                    "{} {} = {};",
-                    self.c_type(ty)?,
-                    name,
-                    self.gen_expr(value)?
-                ));
-                self.declare_var(name, ty.clone());
-            }
+            } => self.gen_let_stmt(name, ty, value)?,
             Stmt::ReturnStmt { value } => match value {
                 Some(expr) => self.emit(&format!("return {};", self.gen_expr(expr)?)),
                 None => self.emit("return;"),
@@ -394,6 +386,63 @@ impl CGen {
         Ok(())
     }
 
+    fn gen_let_stmt(&mut self, name: &str, ty: &TypeNode, value: &Expr) -> XResult<()> {
+        if let Expr::ArrayLiteral { elements } = value {
+            self.gen_array_let_stmt(name, ty, elements)?;
+        } else {
+            self.emit(&format!(
+                "{} {} = {};",
+                self.c_type(ty)?,
+                name,
+                self.gen_expr(value)?
+            ));
+        }
+        self.declare_var(name, ty.clone());
+        Ok(())
+    }
+
+    fn gen_array_let_stmt(&mut self, name: &str, ty: &TypeNode, elements: &[Expr]) -> XResult<()> {
+        let TypeNode::TypeExpr {
+            name: ty_name,
+            args,
+        } = ty
+        else {
+            return Err(XError::Codegen(
+                "array literal initializer requires an Array<T, N> type annotation".to_string(),
+            ));
+        };
+        if ty_name != "Array" || args.len() != 2 {
+            return Err(XError::Codegen(format!(
+                "array literal initializer requires Array<T, N>, got {ty_name}<...>"
+            )));
+        }
+
+        let declared_len = self.const_type_arg_value(&args[1], "Array length")?;
+        let declared_len = declared_len.parse::<usize>().map_err(|_| {
+            XError::Codegen(format!(
+                "Array length must fit usize for codegen, got {declared_len:?}"
+            ))
+        })?;
+        if elements.len() != declared_len {
+            return Err(XError::Codegen(format!(
+                "Array literal length mismatch: Array expects {declared_len} elements, got {}",
+                elements.len()
+            )));
+        }
+
+        let mut rendered_elements = Vec::new();
+        for element in elements {
+            rendered_elements.push(self.gen_expr(element)?);
+        }
+        self.emit(&format!(
+            "{} {} = {{ .data = {{{}}} }};",
+            self.c_type(ty)?,
+            name,
+            rendered_elements.join(", ")
+        ));
+        Ok(())
+    }
+
     fn gen_for_stmt(&mut self, iterator: &str, iterable: &Expr, body: &Block) -> XResult<()> {
         let Expr::Identifier {
             name: iterable_name,
@@ -444,6 +493,10 @@ impl CGen {
             Expr::StringLiteral { value } => Ok(serde_json::to_string(value)?),
             Expr::BoolLiteral { value } => Ok(if *value { "true" } else { "false" }.to_string()),
             Expr::Identifier { name } => Ok(name.clone()),
+            Expr::ArrayLiteral { .. } => Err(XError::Codegen(
+                "array literals are only supported in typed Array<T, N> let initializers"
+                    .to_string(),
+            )),
             Expr::BinaryExpr { op, left, right } => Ok(format!(
                 "({} {} {})",
                 self.gen_expr(left)?,

@@ -36,5 +36,8 @@ jobs:
       - name: Generate array type example C
         run: make c-array-type
 
+      - name: Run array literal example
+        run: make run-array-literal
+
       - name: Run if_else example
         run: make run-if

@@ -124,6 +124,9 @@ make c-loop
 
 # Generate and compile examples/array_type.x as a C object file
 make c-array-type
+
+# Compile examples/array_literal.x to C, build it, and run it
+make run-array-literal
 ```
 
 Expected `make run-if` output:
@@ -144,6 +147,8 @@ Current prototype scope:
   for the `examples/loop.x` shape.
 - C codegen supports fixed array type lowering such as `Array<i32, 4>` to a C
   struct with inline storage.
+- Array literals are supported in typed `Array<T, N>` `let` initializers, for
+  example `let values: Array<i32, 4> = [1, 2, 3, 4]`.
 - `Option<T>`, `Result<T, E>`, `match`, and full collection lowering are parsed
   but not lowered to C yet.
 
