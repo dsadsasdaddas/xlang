@@ -2,30 +2,85 @@ use crate::ast::*;
 use crate::error::{XError, XResult};
 use std::collections::HashMap;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CheckedType {
+    Unknown,
+    IntLiteral,
+    FloatLiteral,
+    StringLiteral,
+    Named {
+        name: String,
+        args: Vec<CheckedType>,
+    },
+    Const(String),
+    ArrayLiteral(Vec<CheckedType>),
+}
+
+#[derive(Clone, Debug)]
 struct VarInfo {
     mutable: bool,
+    ty: CheckedType,
+}
+
+#[derive(Clone, Debug)]
+struct FnSig {
+    params: Vec<CheckedType>,
+    return_type: CheckedType,
 }
 
 #[derive(Default)]
 struct Checker {
     scopes: Vec<HashMap<String, VarInfo>>,
+    functions: HashMap<String, FnSig>,
+    return_types: Vec<CheckedType>,
 }
 
 pub fn check_program(program: &Program) -> XResult<()> {
     let mut checker = Checker::default();
+    checker.collect_functions(program);
     checker.check_program(program)
 }
 
 impl Checker {
+    fn collect_functions(&mut self, program: &Program) {
+        for item in &program.items {
+            if let Item::FnDecl {
+                name,
+                params,
+                return_type,
+                ..
+            } = item
+            {
+                self.functions.insert(
+                    name.clone(),
+                    FnSig {
+                        params: params
+                            .iter()
+                            .map(|param| type_from_node(&param.ty))
+                            .collect(),
+                        return_type: type_from_node(return_type),
+                    },
+                );
+            }
+        }
+    }
+
     fn check_program(&mut self, program: &Program) -> XResult<()> {
         for item in &program.items {
-            if let Item::FnDecl { params, body, .. } = item {
+            if let Item::FnDecl {
+                params,
+                return_type,
+                body,
+                ..
+            } = item
+            {
                 self.push_scope();
+                self.return_types.push(type_from_node(return_type));
                 for param in params {
-                    self.declare(&param.name, false);
+                    self.declare(&param.name, false, type_from_node(&param.ty));
                 }
                 self.check_statements(&body.statements)?;
+                self.return_types.pop();
                 self.pop_scope();
             }
         }
@@ -40,9 +95,9 @@ impl Checker {
         self.scopes.pop();
     }
 
-    fn declare(&mut self, name: &str, mutable: bool) {
+    fn declare(&mut self, name: &str, mutable: bool, ty: CheckedType) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), VarInfo { mutable });
+            scope.insert(name.to_string(), VarInfo { mutable, ty });
         }
     }
 
@@ -50,7 +105,14 @@ impl Checker {
         self.scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.get(name).copied())
+            .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn current_return_type(&self) -> CheckedType {
+        self.return_types
+            .last()
+            .cloned()
+            .unwrap_or(CheckedType::Unknown)
     }
 
     fn check_block(&mut self, block: &Block) -> XResult<()> {
@@ -72,18 +134,25 @@ impl Checker {
             Stmt::LetStmt {
                 mutable,
                 name,
+                ty,
                 value,
-                ..
             } => {
-                self.check_expr(value)?;
-                self.declare(name, *mutable);
+                let declared = type_from_node(ty);
+                let actual = self.infer_expr(value)?;
+                self.expect_assignable(
+                    &declared,
+                    &actual,
+                    &format!("initializer for variable {name:?}"),
+                )?;
+                self.declare(name, *mutable, declared);
             }
             Stmt::IfStmt {
                 condition,
                 then_block,
                 else_branch,
             } => {
-                self.check_expr(condition)?;
+                let condition_ty = self.infer_expr(condition)?;
+                self.expect_bool(&condition_ty, "if condition")?;
                 self.check_block(then_block)?;
                 match else_branch {
                     Some(ElseBranch::Block(block)) => self.check_block(block)?,
@@ -96,88 +165,422 @@ impl Checker {
                 iterable,
                 body,
             } => {
-                self.check_expr(iterable)?;
+                let iterable_ty = self.infer_expr(iterable)?;
+                let iterator_ty = match &iterable_ty {
+                    CheckedType::Named { name, args } if name == "Slice" && args.len() == 1 => {
+                        args[0].clone()
+                    }
+                    CheckedType::Unknown => CheckedType::Unknown,
+                    other => {
+                        return Err(XError::Type(format!(
+                            "for-in expects Slice<T>, got {}",
+                            other.display()
+                        )));
+                    }
+                };
                 self.push_scope();
-                self.declare(iterator, false);
+                self.declare(iterator, false, iterator_ty);
                 self.check_statements(&body.statements)?;
                 self.pop_scope();
             }
             Stmt::WhileStmt { condition, body } => {
-                self.check_expr(condition)?;
+                let condition_ty = self.infer_expr(condition)?;
+                self.expect_bool(&condition_ty, "while condition")?;
                 self.check_block(body)?;
             }
             Stmt::MatchStmt { value, arms } => {
-                self.check_expr(value)?;
+                self.infer_expr(value)?;
                 for arm in arms {
                     self.push_scope();
                     let Pattern::VariantPattern { bindings, .. } = &arm.pattern;
                     for binding in bindings {
-                        self.declare(binding, false);
+                        self.declare(binding, false, CheckedType::Unknown);
                     }
                     self.check_statements(&arm.body.statements)?;
                     self.pop_scope();
                 }
             }
             Stmt::ReturnStmt { value } => {
-                if let Some(value) = value {
-                    self.check_expr(value)?;
+                let expected = self.current_return_type();
+                match value {
+                    Some(value) => {
+                        let actual = self.infer_expr(value)?;
+                        self.expect_assignable(&expected, &actual, "return value")?;
+                    }
+                    None => {
+                        return Err(XError::Type(format!(
+                            "return statement missing value for function returning {}",
+                            expected.display()
+                        )));
+                    }
                 }
             }
-            Stmt::ExprStmt { expr } => self.check_expr(expr)?,
+            Stmt::ExprStmt { expr } => {
+                self.infer_expr(expr)?;
+            }
             Stmt::BreakStmt | Stmt::ContinueStmt => {}
         }
         Ok(())
     }
 
-    fn check_expr(&mut self, expr: &Expr) -> XResult<()> {
+    fn infer_expr(&mut self, expr: &Expr) -> XResult<CheckedType> {
         match expr {
-            Expr::IntLiteral { .. }
-            | Expr::FloatLiteral { .. }
-            | Expr::StringLiteral { .. }
-            | Expr::BoolLiteral { .. }
-            | Expr::Identifier { .. } => {}
+            Expr::IntLiteral { .. } => Ok(CheckedType::IntLiteral),
+            Expr::FloatLiteral { .. } => Ok(CheckedType::FloatLiteral),
+            Expr::StringLiteral { .. } => Ok(CheckedType::StringLiteral),
+            Expr::BoolLiteral { .. } => Ok(CheckedType::named("bool")),
+            Expr::Identifier { name } => {
+                if is_builtin_variant(name) {
+                    return Ok(CheckedType::Unknown);
+                }
+                self.lookup(name)
+                    .map(|var| var.ty)
+                    .ok_or_else(|| XError::Type(format!("unknown variable {name:?}")))
+            }
             Expr::ArrayLiteral { elements } => {
+                let mut element_types = Vec::new();
                 for element in elements {
-                    self.check_expr(element)?;
+                    element_types.push(self.infer_expr(element)?);
                 }
+                Ok(CheckedType::ArrayLiteral(element_types))
             }
-            Expr::BinaryExpr { left, right, .. } => {
-                self.check_expr(left)?;
-                self.check_expr(right)?;
-            }
-            Expr::UnaryExpr { value, .. } => self.check_expr(value)?,
+            Expr::BinaryExpr { op, left, right } => self.infer_binary_expr(op, left, right),
+            Expr::UnaryExpr { op, value } => self.infer_unary_expr(op, value),
             Expr::AssignmentExpr { target, value } => {
-                self.check_assignment_target(target)?;
-                self.check_expr(value)?;
+                let target_ty = self.check_assignment_target(target)?;
+                let value_ty = self.infer_expr(value)?;
+                self.expect_assignable(&target_ty, &value_ty, "assignment value")?;
+                Ok(target_ty)
             }
-            Expr::CallExpr { callee, args } => {
-                self.check_expr(callee)?;
-                for arg in args {
-                    self.check_expr(arg)?;
-                }
+            Expr::CallExpr { callee, args } => self.infer_call_expr(callee, args),
+            Expr::FieldAccessExpr { object, .. } => {
+                self.infer_expr(object)?;
+                Ok(CheckedType::Unknown)
             }
-            Expr::FieldAccessExpr { object, .. } => self.check_expr(object)?,
         }
-        Ok(())
     }
 
-    fn check_assignment_target(&mut self, target: &Expr) -> XResult<()> {
+    fn infer_binary_expr(&mut self, op: &str, left: &Expr, right: &Expr) -> XResult<CheckedType> {
+        let left_ty = self.infer_expr(left)?;
+        let right_ty = self.infer_expr(right)?;
+        match op {
+            "+" | "-" | "*" | "/" | "%" => self.infer_numeric_result(op, &left_ty, &right_ty),
+            ">" | ">=" | "<" | "<=" => {
+                self.expect_numeric_pair(op, &left_ty, &right_ty)?;
+                Ok(CheckedType::named("bool"))
+            }
+            "==" | "!=" => {
+                if !left_ty.is_unknown()
+                    && !right_ty.is_unknown()
+                    && !self.types_compatible(&left_ty, &right_ty)
+                    && !self.types_compatible(&right_ty, &left_ty)
+                {
+                    return Err(XError::Type(format!(
+                        "operator {op} cannot compare {} and {}",
+                        left_ty.display(),
+                        right_ty.display()
+                    )));
+                }
+                Ok(CheckedType::named("bool"))
+            }
+            "&&" | "||" => {
+                self.expect_bool(&left_ty, &format!("left operand of {op}"))?;
+                self.expect_bool(&right_ty, &format!("right operand of {op}"))?;
+                Ok(CheckedType::named("bool"))
+            }
+            _ => Ok(CheckedType::Unknown),
+        }
+    }
+
+    fn infer_unary_expr(&mut self, op: &str, value: &Expr) -> XResult<CheckedType> {
+        let value_ty = self.infer_expr(value)?;
+        match op {
+            "!" => {
+                self.expect_bool(&value_ty, "operand of !")?;
+                Ok(CheckedType::named("bool"))
+            }
+            "-" => {
+                self.expect_numeric(&value_ty, "operand of unary -")?;
+                Ok(value_ty)
+            }
+            _ => Ok(CheckedType::Unknown),
+        }
+    }
+
+    fn infer_call_expr(&mut self, callee: &Expr, args: &[Expr]) -> XResult<CheckedType> {
+        if let Expr::Identifier { name } = callee {
+            if let Some(sig) = self.functions.get(name).cloned() {
+                if args.len() != sig.params.len() {
+                    return Err(XError::Type(format!(
+                        "function {name:?} expects {} arguments, got {}",
+                        sig.params.len(),
+                        args.len()
+                    )));
+                }
+                for (index, (arg, param_ty)) in args.iter().zip(&sig.params).enumerate() {
+                    let arg_ty = self.infer_expr(arg)?;
+                    self.expect_assignable(
+                        param_ty,
+                        &arg_ty,
+                        &format!("argument {} for function {name:?}", index + 1),
+                    )?;
+                }
+                return Ok(sig.return_type);
+            }
+
+            for arg in args {
+                self.infer_expr(arg)?;
+            }
+            return Ok(CheckedType::Unknown);
+        }
+
+        self.infer_expr(callee)?;
+        for arg in args {
+            self.infer_expr(arg)?;
+        }
+        Ok(CheckedType::Unknown)
+    }
+
+    fn check_assignment_target(&mut self, target: &Expr) -> XResult<CheckedType> {
         match target {
             Expr::Identifier { name } => match self.lookup(name) {
-                Some(VarInfo { mutable: true }) => Ok(()),
-                Some(VarInfo { mutable: false }) => Err(XError::Type(format!(
+                Some(VarInfo {
+                    mutable: true, ty, ..
+                }) => Ok(ty),
+                Some(VarInfo { mutable: false, .. }) => Err(XError::Type(format!(
                     "cannot assign to immutable variable {name:?}; declare it with `let mut {name}` if reassignment is intended"
                 ))),
                 None => Err(XError::Type(format!(
                     "cannot assign to unknown variable {name:?}"
                 ))),
             },
-            Expr::FieldAccessExpr { object, .. } => self.check_assignment_target(object),
+            Expr::FieldAccessExpr { object, .. } => {
+                self.check_assignment_target(object)?;
+                Ok(CheckedType::Unknown)
+            }
             _ => Err(XError::Type(
                 "assignment target must be a variable or field access".to_string(),
             )),
         }
     }
+
+    fn infer_numeric_result(
+        &self,
+        op: &str,
+        left: &CheckedType,
+        right: &CheckedType,
+    ) -> XResult<CheckedType> {
+        self.expect_numeric_pair(op, left, right)?;
+        if left.is_unknown() || right.is_unknown() {
+            return Ok(CheckedType::Unknown);
+        }
+        if left == right {
+            return Ok(left.clone());
+        }
+        if left.is_int_literal() && right.is_integer_scalar() {
+            return Ok(right.clone());
+        }
+        if right.is_int_literal() && left.is_integer_scalar() {
+            return Ok(left.clone());
+        }
+        if left.is_float_literal() && right.is_float_scalar() {
+            return Ok(right.clone());
+        }
+        if right.is_float_literal() && left.is_float_scalar() {
+            return Ok(left.clone());
+        }
+        if left.is_int_literal() && right.is_int_literal() {
+            return Ok(CheckedType::IntLiteral);
+        }
+        if left.is_float_literal() && right.is_float_literal() {
+            return Ok(CheckedType::FloatLiteral);
+        }
+        Err(XError::Type(format!(
+            "operator {op} cannot combine {} and {}",
+            left.display(),
+            right.display()
+        )))
+    }
+
+    fn expect_assignable(
+        &self,
+        expected: &CheckedType,
+        actual: &CheckedType,
+        context: &str,
+    ) -> XResult<()> {
+        if self.types_compatible(expected, actual) {
+            return Ok(());
+        }
+        Err(XError::Type(format!(
+            "{context} expects {}, got {}",
+            expected.display(),
+            actual.display()
+        )))
+    }
+
+    fn types_compatible(&self, expected: &CheckedType, actual: &CheckedType) -> bool {
+        if expected.is_unknown() || actual.is_unknown() {
+            return true;
+        }
+        match (expected, actual) {
+            (CheckedType::Named { name, args }, CheckedType::ArrayLiteral(element_types))
+                if name == "Array" && args.len() == 2 =>
+            {
+                let Some(expected_len) = array_len(&args[1]) else {
+                    return true;
+                };
+                if element_types.len() != expected_len {
+                    return false;
+                }
+                element_types
+                    .iter()
+                    .all(|actual| self.types_compatible(&args[0], actual))
+            }
+            (CheckedType::Named { name, .. }, CheckedType::IntLiteral)
+                if name == "i32" || name == "i64" =>
+            {
+                true
+            }
+            (CheckedType::Named { name, .. }, CheckedType::FloatLiteral)
+                if name == "f32" || name == "f64" =>
+            {
+                true
+            }
+            (CheckedType::Named { name, .. }, CheckedType::StringLiteral)
+                if name == "String" || name == "Str" =>
+            {
+                true
+            }
+            _ => expected == actual,
+        }
+    }
+
+    fn expect_bool(&self, ty: &CheckedType, context: &str) -> XResult<()> {
+        if ty.is_unknown() || ty.is_bool() {
+            Ok(())
+        } else {
+            Err(XError::Type(format!(
+                "{context} must be bool, got {}",
+                ty.display()
+            )))
+        }
+    }
+
+    fn expect_numeric_pair(
+        &self,
+        op: &str,
+        left: &CheckedType,
+        right: &CheckedType,
+    ) -> XResult<()> {
+        self.expect_numeric(left, &format!("left operand of {op}"))?;
+        self.expect_numeric(right, &format!("right operand of {op}"))?;
+        if left.is_unknown() || right.is_unknown() {
+            return Ok(());
+        }
+        if self.types_compatible(left, right) || self.types_compatible(right, left) {
+            Ok(())
+        } else {
+            Err(XError::Type(format!(
+                "operator {op} cannot combine {} and {}",
+                left.display(),
+                right.display()
+            )))
+        }
+    }
+
+    fn expect_numeric(&self, ty: &CheckedType, context: &str) -> XResult<()> {
+        if ty.is_unknown() || ty.is_numeric() {
+            Ok(())
+        } else {
+            Err(XError::Type(format!(
+                "{context} must be numeric, got {}",
+                ty.display()
+            )))
+        }
+    }
+}
+
+impl CheckedType {
+    fn named(name: &str) -> Self {
+        Self::Named {
+            name: name.to_string(),
+            args: Vec::new(),
+        }
+    }
+
+    fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    fn is_bool(&self) -> bool {
+        matches!(self, Self::Named { name, args } if name == "bool" && args.is_empty())
+    }
+
+    fn is_int_literal(&self) -> bool {
+        matches!(self, Self::IntLiteral)
+    }
+
+    fn is_float_literal(&self) -> bool {
+        matches!(self, Self::FloatLiteral)
+    }
+
+    fn is_integer_scalar(&self) -> bool {
+        matches!(self, Self::Named { name, args } if args.is_empty() && matches!(name.as_str(), "i32" | "i64"))
+    }
+
+    fn is_float_scalar(&self) -> bool {
+        matches!(self, Self::Named { name, args } if args.is_empty() && matches!(name.as_str(), "f32" | "f64"))
+    }
+
+    fn is_numeric(&self) -> bool {
+        self.is_int_literal()
+            || self.is_float_literal()
+            || self.is_integer_scalar()
+            || self.is_float_scalar()
+    }
+
+    fn display(&self) -> String {
+        match self {
+            Self::Unknown => "unknown".to_string(),
+            Self::IntLiteral => "integer literal".to_string(),
+            Self::FloatLiteral => "float literal".to_string(),
+            Self::StringLiteral => "string literal".to_string(),
+            Self::Named { name, args } if args.is_empty() => name.clone(),
+            Self::Named { name, args } => {
+                let args = args
+                    .iter()
+                    .map(Self::display)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{name}<{args}>")
+            }
+            Self::Const(value) => value.clone(),
+            Self::ArrayLiteral(elements) => {
+                format!("array literal with {} elements", elements.len())
+            }
+        }
+    }
+}
+
+fn type_from_node(ty: &TypeNode) -> CheckedType {
+    match ty {
+        TypeNode::TypeExpr { name, args } => CheckedType::Named {
+            name: name.clone(),
+            args: args.iter().map(type_from_node).collect(),
+        },
+        TypeNode::ConstTypeArg { value } => CheckedType::Const(value.clone()),
+    }
+}
+
+fn array_len(ty: &CheckedType) -> Option<usize> {
+    let CheckedType::Const(value) = ty else {
+        return None;
+    };
+    value.parse().ok()
+}
+
+fn is_builtin_variant(name: &str) -> bool {
+    matches!(name, "Some" | "None" | "Ok" | "Err")
 }
 
 #[cfg(test)]
@@ -243,5 +646,160 @@ fn bump(x: i32): i32 {
         );
 
         assert!(err.contains("cannot assign to immutable variable \"x\""));
+    }
+
+    #[test]
+    fn rejects_let_initializer_type_mismatch() {
+        let err = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    let x: i32 = true
+    return x
+}
+"#,
+        );
+
+        assert!(err.contains("initializer for variable \"x\" expects i32, got bool"));
+    }
+
+    #[test]
+    fn rejects_if_condition_that_is_not_bool() {
+        let err = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    let x: i32 = 1
+    if x {
+        return 1
+    }
+    return 0
+}
+"#,
+        );
+
+        assert!(err.contains("if condition must be bool, got i32"));
+    }
+
+    #[test]
+    fn rejects_return_type_mismatch() {
+        let err = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    return true
+}
+"#,
+        );
+
+        assert!(err.contains("return value expects i32, got bool"));
+    }
+
+    #[test]
+    fn rejects_unknown_variable_use() {
+        let err = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    return missing
+}
+"#,
+        );
+
+        assert!(err.contains("unknown variable \"missing\""));
+    }
+
+    #[test]
+    fn allows_builtin_option_none_variant_for_now() {
+        let result = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    let missing: Option<i32> = None
+    return 0
+}
+"#,
+        );
+
+        assert_eq!(result, "ok");
+    }
+
+    #[test]
+    fn rejects_assignment_value_type_mismatch() {
+        let err = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    let mut x: i32 = 1
+    x = true
+    return x
+}
+"#,
+        );
+
+        assert!(err.contains("assignment value expects i32, got bool"));
+    }
+
+    #[test]
+    fn rejects_array_literal_length_mismatch() {
+        let err = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    let values: Array<i32, 2> = [1, 2, 3]
+    return 0
+}
+"#,
+        );
+
+        assert!(err.contains(
+            "initializer for variable \"values\" expects Array<i32, 2>, got array literal with 3 elements"
+        ));
+    }
+
+    #[test]
+    fn allows_function_call_with_checked_argument_and_return_types() {
+        let result = check_source(
+            r#"
+module main
+
+fn id(x: i32): i32 {
+    return x
+}
+
+fn main(): i32 {
+    let y: i32 = id(1)
+    return y
+}
+"#,
+        );
+
+        assert_eq!(result, "ok");
+    }
+
+    #[test]
+    fn rejects_function_call_argument_type_mismatch() {
+        let err = check_source(
+            r#"
+module main
+
+fn id(x: i32): i32 {
+    return x
+}
+
+fn main(): i32 {
+    return id(true)
+}
+"#,
+        );
+
+        assert!(err.contains("argument 1 for function \"id\" expects i32, got bool"));
     }
 }
