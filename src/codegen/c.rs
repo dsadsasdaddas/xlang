@@ -989,6 +989,10 @@ impl CGen {
             "    if (stat(path, &st) != 0) return 0;",
             "    return (int32_t)st.st_size;",
             "}",
+            "int32_t __xlang_file_exists(const char* path) {",
+            "    struct stat st;",
+            "    return stat(path, &st) == 0 ? 1 : 0;",
+            "}",
             "#endif",
             "",
         ];
@@ -1064,6 +1068,7 @@ impl CGen {
             "dir_count" => format!("__xlang_dir_count({a})"),
             "is_dir" => format!("__xlang_is_dir({a})"),
             "file_size" => format!("__xlang_file_size({a})"),
+            "file_exists" => format!("__xlang_file_exists({a})"),
             "make_dir" => format!("mkdir({a}, 0755)"),
             "kill" => {
                 let Some(second) = args.get(1) else {
