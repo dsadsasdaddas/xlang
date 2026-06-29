@@ -1,13 +1,13 @@
 module main
 
-// wc <file> — count lines and characters (a subset of GNU wc). Uses str_char_at
-// to iterate the file contents byte by byte.
+// wc [file] — count lines and characters (subset of GNU wc). stdin if no file.
 fn main(): i32 {
-    if argc() < 2 {
-        print_str("usage: wc <file>")
-        return 1
+    let mut s: String = ""
+    if argc() >= 2 {
+        s = read_file(argv(1))
+    } else {
+        s = read_stdin()
     }
-    let s: String = read_file(argv(1))
     let n: i32 = str_len(s)
     let mut chars: i32 = 0
     let mut lines: i32 = 0

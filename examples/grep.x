@@ -1,14 +1,18 @@
 module main
 
-// grep <pattern> <file> — print lines containing the pattern (like GNU grep).
-// Splits the file into lines (by '\n' = 10) and uses str_find to match.
+// grep <pattern> [file] — print lines containing the pattern. stdin if no file.
 fn main(): i32 {
-    if argc() < 3 {
-        print_str("usage: grep <pattern> <file>")
+    if argc() < 2 {
+        print_str("usage: grep <pattern> [file]")
         return 1
     }
     let pat: String = argv(1)
-    let s: String = read_file(argv(2))
+    let mut s: String = ""
+    if argc() >= 3 {
+        s = read_file(argv(2))
+    } else {
+        s = read_stdin()
+    }
     let n: i32 = str_len(s)
     let mut start: i32 = 0
     let mut i: i32 = 0
