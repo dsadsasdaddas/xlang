@@ -1070,3 +1070,89 @@ impl CGen {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::CGen;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn gen_c(source: &str) -> String {
+        let (tokens, _) = Lexer::new(source).tokenize();
+        let program = Parser::new(tokens, "<test>").parse().expect("parse source");
+        CGen::new().generate(&program).expect("codegen")
+    }
+
+    #[test]
+    fn lowers_option_match_to_if_else() {
+        let c = gen_c(
+            "module main\nfn f(o: Option<i32>): i32 { match o { Some(v) => { return v } None => { return 0 } } }\nfn main(): i32 { return 0 }",
+        );
+        assert!(c.contains("typedef struct"), "no Option struct: {c}");
+        assert!(c.contains(".some"), "no .some field: {c}");
+        assert!(c.contains("if (o.some)"), "no match lowering: {c}");
+    }
+
+    #[test]
+    fn lowers_result_match_to_if_else() {
+        let c = gen_c(
+            "module main\nfn f(r: Result<i32, String>): i32 { match r { Ok(v) => { return v } Err(e) => { return 0 } } }\nfn main(): i32 { return 0 }",
+        );
+        assert!(c.contains(".ok"), "no .ok field: {c}");
+        assert!(c.contains("if (r.ok)"), "no result match lowering: {c}");
+    }
+
+    #[test]
+    fn emits_struct_literal_compound() {
+        let c = gen_c(
+            "module main\nstruct P { x: i32 }\nfn main(): i32 { let p: P = P { x: 1 } return p.x }",
+        );
+        assert!(c.contains("(P){ .x ="), "no struct literal: {c}");
+    }
+
+    #[test]
+    fn emits_vec_push_helper_call() {
+        let c = gen_c(
+            "module main\nfn main(): i32 { let mut v: Vec<i32> = vec_new() v.push(1) return 0 }",
+        );
+        assert!(c.contains("__xlang_vec_push_i32(&v,"), "no vec push: {c}");
+    }
+
+    #[test]
+    fn emits_fork_call() {
+        let c = gen_c("module main\nfn main(): i32 { let p: i32 = fork() return p }");
+        assert!(c.contains("fork();"), "no fork: {c}");
+    }
+
+    #[test]
+    fn lowers_for_in_over_array() {
+        let c = gen_c(
+            "module main\nfn main(): i32 { let a: Array<i32, 3> = [1, 2, 3] for n in a { print_i32(n) } return 0 }",
+        );
+        assert!(c.contains("< 3;"), "no array bound N: {c}");
+        assert!(c.contains(".data["), "no .data index: {c}");
+    }
+
+    #[test]
+    fn emits_print_printf() {
+        let c = gen_c("module main\nfn main(): i32 { print_i32(42) return 0 }");
+        assert!(c.contains("printf("), "no printf: {c}");
+    }
+
+    #[test]
+    fn emits_array_literal_initializer() {
+        let c = gen_c("module main\nfn main(): i32 { let a: Array<i32, 2> = [1, 2] return 0 }");
+        assert!(c.contains(".data = {"), "no array literal init: {c}");
+    }
+
+    #[test]
+    fn emits_function_prototype() {
+        let c = gen_c(
+            "module main\nfn helper(x: i32): i32 { return x }\nfn main(): i32 { return helper(1) }",
+        );
+        assert!(
+            c.contains("int32_t helper(int32_t x);"),
+            "no prototype: {c}"
+        );
+    }
+}
