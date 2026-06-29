@@ -35,6 +35,7 @@ impl CGen {
         self.emit("#include <stdlib.h>");
         self.emit("");
         self.emit_runtime_preamble();
+        self.emit_networking_preamble();
 
         for typedef in self.collect_runtime_typedefs(program)? {
             self.emit(&typedef);
@@ -844,6 +845,44 @@ impl CGen {
         }
     }
 
+    /// Networking helpers (socket I/O), guarded so non-Linux builds (which lack
+    /// these POSIX headers) skip them entirely. Programs use networking only on
+    /// Linux (CI / the target server); on Windows the block is preprocessed out,
+    /// so the run-safe tests (which cc the generated C locally) still pass.
+    fn emit_networking_preamble(&mut self) {
+        let lines = [
+            "#if !defined(_WIN32)",
+            "#include <unistd.h>",
+            "#include <sys/socket.h>",
+            "#include <netinet/in.h>",
+            "#include <arpa/inet.h>",
+            "int32_t __xlang_tcp_listen(int32_t port) {",
+            "    int fd = socket(AF_INET, SOCK_STREAM, 0);",
+            "    int opt = 1;",
+            "    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));",
+            "    struct sockaddr_in addr;",
+            "    addr.sin_family = AF_INET;",
+            "    addr.sin_addr.s_addr = INADDR_ANY;",
+            "    addr.sin_port = htons((uint16_t)port);",
+            "    bind(fd, (struct sockaddr*)&addr, sizeof(addr));",
+            "    listen(fd, 64);",
+            "    return (int32_t)fd;",
+            "}",
+            "char* __xlang_recv_str(int32_t fd) {",
+            "    char* buf = (char*)malloc(65536);",
+            "    ssize_t n = recv(fd, buf, 65535, 0);",
+            "    if (n < 0) n = 0;",
+            "    buf[n] = 0;",
+            "    return buf;",
+            "}",
+            "#endif",
+            "",
+        ];
+        for line in lines {
+            self.emit(line);
+        }
+    }
+
     /// Lower the string builtins `str_len` / `str_concat` / `int_to_str`
     /// (strlen inline; the other two call the runtime-preamble helpers).
     fn try_string_call(
@@ -875,6 +914,17 @@ impl CGen {
                 };
                 let b = self.gen_expr(second)?;
                 format!("__xlang_write_file({a}, {b})")
+            }
+            "tcp_listen" => format!("__xlang_tcp_listen({a})"),
+            "accept" => format!("accept({a}, 0, 0)"),
+            "recv_str" => format!("__xlang_recv_str({a})"),
+            "close_fd" => format!("close({a})"),
+            "send_str" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("send({a}, {b}, strlen({b}), 0)")
             }
             _ => return Ok(None),
         };
