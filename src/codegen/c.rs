@@ -830,7 +830,7 @@ impl CGen {
             "    if (!f) { char* e = (char*)malloc(1); e[0] = 0; return e; }",
             "    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);",
             "    char* buf = (char*)malloc(sz + 1);",
-            "    fread(buf, 1, sz, f); buf[sz] = 0; fclose(f);",
+            "    size_t rd = fread(buf, 1, sz, f); (void)rd; buf[sz] = 0; fclose(f);",
             "    return buf;",
             "}",
             "void __xlang_write_file(const char* path, const char* content) {",
