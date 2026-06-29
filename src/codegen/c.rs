@@ -1294,7 +1294,9 @@ impl CGen {
     fn gen_expr(&self, expr: &Spanned<Expr>) -> XResult<String> {
         match &expr.node {
             Expr::IntLiteral { value } | Expr::FloatLiteral { value } => Ok(value.clone()),
-            Expr::StringLiteral { value } => Ok(serde_json::to_string(value)?),
+            Expr::StringLiteral { value } => {
+                Ok(serde_json::to_string(value)?.replace("\\u001b", "\\x1b"))
+            }
             Expr::BoolLiteral { value } => Ok(if *value { "true" } else { "false" }.to_string()),
             Expr::Identifier { name } => Ok(name.clone()),
             Expr::ArrayLiteral { .. } => Err(XError::Codegen(
