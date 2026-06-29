@@ -961,6 +961,26 @@ impl CGen {
         )))
     }
 
+    /// Zero-argument builtins (`fork`, `getpid`) — lower to the C calls. They
+    /// need <unistd.h>, which the guarded networking preamble includes on Linux.
+    fn try_zero_arg_call(
+        &self,
+        callee: &Spanned<Expr>,
+        args: &[Spanned<Expr>],
+    ) -> XResult<Option<String>> {
+        if !args.is_empty() {
+            return Ok(None);
+        }
+        let Expr::Identifier { name } = &callee.node else {
+            return Ok(None);
+        };
+        Ok(Some(match name.as_str() {
+            "fork" => "fork()".to_string(),
+            "getpid" => "getpid()".to_string(),
+            _ => return Ok(None),
+        }))
+    }
+
     fn try_print_call(
         &self,
         callee: &Spanned<Expr>,
@@ -1010,6 +1030,9 @@ impl CGen {
                 self.gen_expr(value)?
             )),
             Expr::CallExpr { callee, args } => {
+                if let Some(rendered) = self.try_zero_arg_call(callee, args)? {
+                    return Ok(rendered);
+                }
                 if let Some(rendered) = self.try_print_call(callee, args)? {
                     return Ok(rendered);
                 }
