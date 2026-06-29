@@ -31,7 +31,10 @@ impl CGen {
         self.emit("#include <stdbool.h>");
         self.emit("#include <stddef.h>");
         self.emit("#include <stdio.h>");
+        self.emit("#include <string.h>");
+        self.emit("#include <stdlib.h>");
         self.emit("");
+        self.emit_runtime_preamble();
 
         for typedef in self.collect_runtime_typedefs(program)? {
             self.emit(&typedef);
@@ -722,6 +725,60 @@ impl CGen {
     /// Recognise the print builtins (`print_i32`/`print_f64`/`print_str`/
     /// `print_bool`) and lower a one-arg call to a `printf`; returns None for
     /// anything else so the normal call path handles it.
+    /// Emit the small C runtime preamble — helpers that need allocation (string
+    /// concatenation, int->str). Non-static so an unused helper doesn't trip
+    /// -Wunused-function.
+    fn emit_runtime_preamble(&mut self) {
+        let lines = [
+            "char* __xlang_str_concat(const char* a, const char* b) {",
+            "    size_t la = strlen(a), lb = strlen(b);",
+            "    char* out = (char*)malloc(la + lb + 1);",
+            "    memcpy(out, a, la);",
+            "    memcpy(out + la, b, lb);",
+            "    out[la + lb] = 0;",
+            "    return out;",
+            "}",
+            "char* __xlang_int_to_str(int32_t n) {",
+            "    char* buf = (char*)malloc(16);",
+            "    snprintf(buf, 16, \"%d\", n);",
+            "    return buf;",
+            "}",
+            "",
+        ];
+        for line in lines {
+            self.emit(line);
+        }
+    }
+
+    /// Lower the string builtins `str_len` / `str_concat` / `int_to_str`
+    /// (strlen inline; the other two call the runtime-preamble helpers).
+    fn try_string_call(
+        &self,
+        callee: &Spanned<Expr>,
+        args: &[Spanned<Expr>],
+    ) -> XResult<Option<String>> {
+        let Expr::Identifier { name } = &callee.node else {
+            return Ok(None);
+        };
+        let Some(first) = args.first() else {
+            return Ok(None);
+        };
+        let a = self.gen_expr(first)?;
+        let rendered = match name.as_str() {
+            "str_len" => format!("(int32_t)strlen({a})"),
+            "int_to_str" => format!("__xlang_int_to_str({a})"),
+            "str_concat" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_str_concat({a}, {b})")
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(rendered))
+    }
+
     fn try_print_call(
         &self,
         callee: &Spanned<Expr>,
@@ -772,6 +829,9 @@ impl CGen {
             )),
             Expr::CallExpr { callee, args } => {
                 if let Some(rendered) = self.try_print_call(callee, args)? {
+                    return Ok(rendered);
+                }
+                if let Some(rendered) = self.try_string_call(callee, args)? {
                     return Ok(rendered);
                 }
                 let mut parts = Vec::new();

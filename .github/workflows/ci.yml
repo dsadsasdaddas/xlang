@@ -62,3 +62,6 @@ jobs:
 
       - name: Run array-double demo (indexing + in-place write)
         run: make run-array-double
+
+      - name: Run string-build demo (concat / len / int_to_str)
+        run: make run-string-build
