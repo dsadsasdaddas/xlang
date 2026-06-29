@@ -50,8 +50,12 @@ impl Parser {
         self.peek().kind == TokenKind::Eof
     }
 
+    /// Does the current token have this text AND be a Symbol or Keyword?
+    /// Crucially this excludes String/Int/Ident tokens, so a string literal
+    /// like `"-"` (whose text is "-") is NOT confused with the minus operator.
     fn check(&self, text: &str) -> bool {
-        self.peek().text == text
+        let tok = self.peek();
+        tok.text == text && matches!(tok.kind, TokenKind::Symbol | TokenKind::Keyword)
     }
 
     fn cur_start(&self) -> u32 {

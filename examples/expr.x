@@ -9,7 +9,7 @@ fn main(): i32 {
     let a: i32 = str_to_int(argv(1))
     let op: String = argv(2)
     let b: i32 = str_to_int(argv(3))
-    let result: i32 = 0
+    let mut result: i32 = 0
     if str_eq(op, "+") {
         result = a + b
     }
