@@ -30,6 +30,7 @@ impl CGen {
         self.emit("#include <stdint.h>");
         self.emit("#include <stdbool.h>");
         self.emit("#include <stddef.h>");
+        self.emit("#include <stdio.h>");
         self.emit("");
 
         for typedef in self.collect_runtime_typedefs(program)? {
@@ -708,6 +709,35 @@ impl CGen {
         Ok(())
     }
 
+    /// Recognise the print builtins (`print_i32`/`print_f64`/`print_str`/
+    /// `print_bool`) and lower a one-arg call to a `printf`; returns None for
+    /// anything else so the normal call path handles it.
+    fn try_print_call(
+        &self,
+        callee: &Spanned<Expr>,
+        args: &[Spanned<Expr>],
+    ) -> XResult<Option<String>> {
+        let Expr::Identifier { name } = &callee.node else {
+            return Ok(None);
+        };
+        if args.len() != 1 {
+            return Ok(None);
+        }
+        self.try_print_builtin(name, &args[0])
+    }
+
+    fn try_print_builtin(&self, name: &str, arg: &Spanned<Expr>) -> XResult<Option<String>> {
+        let arg_c = self.gen_expr(arg)?;
+        let rendered = match name {
+            "print_i32" => format!("printf(\"%d\\n\", {arg_c})"),
+            "print_f64" => format!("printf(\"%f\\n\", {arg_c})"),
+            "print_str" => format!("printf(\"%s\\n\", {arg_c})"),
+            "print_bool" => format!("printf(\"%s\\n\", ({arg_c}) ? \"true\" : \"false\")"),
+            _ => return Ok(None),
+        };
+        Ok(Some(rendered))
+    }
+
     fn gen_expr(&self, expr: &Spanned<Expr>) -> XResult<String> {
         match &expr.node {
             Expr::IntLiteral { value } | Expr::FloatLiteral { value } => Ok(value.clone()),
@@ -731,6 +761,9 @@ impl CGen {
                 self.gen_expr(value)?
             )),
             Expr::CallExpr { callee, args } => {
+                if let Some(rendered) = self.try_print_call(callee, args)? {
+                    return Ok(rendered);
+                }
                 let mut parts = Vec::new();
                 for arg in args {
                     parts.push(self.gen_expr(arg)?);

@@ -53,3 +53,6 @@ jobs:
 
       - name: Run struct demo (literals + field access)
         run: make run-struct-demo
+
+      - name: Run print demo (output builtins)
+        run: make run-print-demo
