@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::error::{XError, XResult};
+use crate::source::Spanned;
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Default)]
@@ -29,16 +30,16 @@ impl CGen {
         }
 
         for item in &program.items {
-            if let Item::StructDecl { .. } = item {
-                self.gen_struct(item)?;
+            if let Item::StructDecl { .. } = &item.node {
+                self.gen_struct(&item.node)?;
                 self.emit("");
             }
         }
 
         for item in &program.items {
-            match item {
+            match &item.node {
                 Item::FnDecl { .. } => {
-                    self.gen_fn(item)?;
+                    self.gen_fn(&item.node)?;
                     self.emit("");
                 }
                 Item::StructDecl { .. } | Item::TypeAliasDecl { .. } => {}
@@ -56,7 +57,7 @@ impl CGen {
     fn collect_runtime_typedefs(&self, program: &Program) -> XResult<Vec<String>> {
         let mut typedefs = BTreeMap::new();
         for item in &program.items {
-            match item {
+            match &item.node {
                 Item::StructDecl { fields, .. } => {
                     for field in fields {
                         self.collect_type_typedefs(&field.ty, &mut typedefs)?;
@@ -88,7 +89,7 @@ impl CGen {
         typedefs: &mut BTreeMap<String, String>,
     ) -> XResult<()> {
         for stmt in &block.statements {
-            match stmt {
+            match &stmt.node {
                 Stmt::LetStmt { ty, .. } => self.collect_type_typedefs(ty, typedefs)?,
                 Stmt::IfStmt {
                     then_block,
@@ -125,7 +126,7 @@ impl CGen {
 
     fn collect_stmt_typedefs(
         &self,
-        stmt: &Stmt,
+        stmt: &Spanned<Stmt>,
         typedefs: &mut BTreeMap<String, String>,
     ) -> XResult<()> {
         self.collect_block_typedefs(
@@ -317,8 +318,8 @@ impl CGen {
         Ok(())
     }
 
-    fn gen_stmt(&mut self, stmt: &Stmt) -> XResult<()> {
-        match stmt {
+    fn gen_stmt(&mut self, stmt: &Spanned<Stmt>) -> XResult<()> {
+        match &stmt.node {
             Stmt::LetStmt {
                 name, ty, value, ..
             } => self.gen_let_stmt(name, ty, value)?,
@@ -379,15 +380,20 @@ impl CGen {
             Stmt::MatchStmt { .. } => {
                 return Err(XError::Codegen(format!(
                     "C backend does not support statement yet: {:?}",
-                    stmt_kind(stmt)
+                    stmt_kind(&stmt.node)
                 )));
             }
         }
         Ok(())
     }
 
-    fn gen_let_stmt(&mut self, name: &str, ty: &TypeNode, value: &Expr) -> XResult<()> {
-        if let Expr::ArrayLiteral { elements } = value {
+    fn gen_let_stmt(
+        &mut self,
+        name: &str,
+        ty: &TypeNode,
+        value: &Spanned<Expr>,
+    ) -> XResult<()> {
+        if let Expr::ArrayLiteral { elements } = &value.node {
             self.gen_array_let_stmt(name, ty, elements)?;
         } else {
             self.emit(&format!(
@@ -401,7 +407,12 @@ impl CGen {
         Ok(())
     }
 
-    fn gen_array_let_stmt(&mut self, name: &str, ty: &TypeNode, elements: &[Expr]) -> XResult<()> {
+    fn gen_array_let_stmt(
+        &mut self,
+        name: &str,
+        ty: &TypeNode,
+        elements: &[Spanned<Expr>],
+    ) -> XResult<()> {
         let TypeNode::TypeExpr {
             name: ty_name,
             args,
@@ -443,10 +454,15 @@ impl CGen {
         Ok(())
     }
 
-    fn gen_for_stmt(&mut self, iterator: &str, iterable: &Expr, body: &Block) -> XResult<()> {
+    fn gen_for_stmt(
+        &mut self,
+        iterator: &str,
+        iterable: &Spanned<Expr>,
+        body: &Block,
+    ) -> XResult<()> {
         let Expr::Identifier {
             name: iterable_name,
-        } = iterable
+        } = &iterable.node
         else {
             return Err(XError::Codegen(
                 "C backend only supports `for value in values` where values is an identifier"
@@ -487,8 +503,8 @@ impl CGen {
         Ok(())
     }
 
-    fn gen_expr(&self, expr: &Expr) -> XResult<String> {
-        match expr {
+    fn gen_expr(&self, expr: &Spanned<Expr>) -> XResult<String> {
+        match &expr.node {
             Expr::IntLiteral { value } | Expr::FloatLiteral { value } => Ok(value.clone()),
             Expr::StringLiteral { value } => Ok(serde_json::to_string(value)?),
             Expr::BoolLiteral { value } => Ok(if *value { "true" } else { "false" }.to_string()),

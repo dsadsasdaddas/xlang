@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::error::{XError, XResult};
+use crate::source::Spanned;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,7 +50,7 @@ impl Checker {
                 params,
                 return_type,
                 ..
-            } = item
+            } = &item.node
             {
                 self.functions.insert(
                     name.clone(),
@@ -72,7 +73,7 @@ impl Checker {
                 return_type,
                 body,
                 ..
-            } = item
+            } = &item.node
             {
                 self.push_scope();
                 self.return_types.push(type_from_node(return_type));
@@ -122,15 +123,15 @@ impl Checker {
         Ok(())
     }
 
-    fn check_statements(&mut self, statements: &[Stmt]) -> XResult<()> {
+    fn check_statements(&mut self, statements: &[Spanned<Stmt>]) -> XResult<()> {
         for stmt in statements {
             self.check_stmt(stmt)?;
         }
         Ok(())
     }
 
-    fn check_stmt(&mut self, stmt: &Stmt) -> XResult<()> {
-        match stmt {
+    fn check_stmt(&mut self, stmt: &Spanned<Stmt>) -> XResult<()> {
+        match &stmt.node {
             Stmt::LetStmt {
                 mutable,
                 name,
@@ -223,8 +224,8 @@ impl Checker {
         Ok(())
     }
 
-    fn infer_expr(&mut self, expr: &Expr) -> XResult<CheckedType> {
-        match expr {
+    fn infer_expr(&mut self, expr: &Spanned<Expr>) -> XResult<CheckedType> {
+        match &expr.node {
             Expr::IntLiteral { .. } => Ok(CheckedType::IntLiteral),
             Expr::FloatLiteral { .. } => Ok(CheckedType::FloatLiteral),
             Expr::StringLiteral { .. } => Ok(CheckedType::StringLiteral),
@@ -260,7 +261,12 @@ impl Checker {
         }
     }
 
-    fn infer_binary_expr(&mut self, op: &str, left: &Expr, right: &Expr) -> XResult<CheckedType> {
+    fn infer_binary_expr(
+        &mut self,
+        op: &str,
+        left: &Spanned<Expr>,
+        right: &Spanned<Expr>,
+    ) -> XResult<CheckedType> {
         let left_ty = self.infer_expr(left)?;
         let right_ty = self.infer_expr(right)?;
         match op {
@@ -292,7 +298,7 @@ impl Checker {
         }
     }
 
-    fn infer_unary_expr(&mut self, op: &str, value: &Expr) -> XResult<CheckedType> {
+    fn infer_unary_expr(&mut self, op: &str, value: &Spanned<Expr>) -> XResult<CheckedType> {
         let value_ty = self.infer_expr(value)?;
         match op {
             "!" => {
@@ -307,8 +313,12 @@ impl Checker {
         }
     }
 
-    fn infer_call_expr(&mut self, callee: &Expr, args: &[Expr]) -> XResult<CheckedType> {
-        if let Expr::Identifier { name } = callee {
+    fn infer_call_expr(
+        &mut self,
+        callee: &Spanned<Expr>,
+        args: &[Spanned<Expr>],
+    ) -> XResult<CheckedType> {
+        if let Expr::Identifier { name } = &callee.node {
             if let Some(sig) = self.functions.get(name).cloned() {
                 if args.len() != sig.params.len() {
                     return Err(XError::Type(format!(
@@ -341,8 +351,8 @@ impl Checker {
         Ok(CheckedType::Unknown)
     }
 
-    fn check_assignment_target(&mut self, target: &Expr) -> XResult<CheckedType> {
-        match target {
+    fn check_assignment_target(&mut self, target: &Spanned<Expr>) -> XResult<CheckedType> {
+        match &target.node {
             Expr::Identifier { name } => match self.lookup(name) {
                 Some(VarInfo {
                     mutable: true, ty, ..
