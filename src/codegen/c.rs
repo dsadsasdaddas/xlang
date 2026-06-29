@@ -1017,6 +1017,14 @@ impl CGen {
             }
             "vec_len" => format!("((int32_t)({a}).len)"),
             "str_to_int" => format!("(int32_t)strtol({a}, 0, 10)"),
+            "remove_file" => format!("remove({a})"),
+            "rename_file" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("rename({a}, {b})")
+            }
             "read_file" => format!("__xlang_read_file({a})"),
             "write_file" => {
                 let Some(second) = args.get(1) else {
