@@ -1127,6 +1127,7 @@ impl CGen {
                 let b = self.gen_expr(second)?;
                 format!("truncate(({a}), ({b}))")
             }
+            "mkfifo" => format!("mkfifo(({a}), 0644)"),
             "str_to_int_oct" => format!("(int32_t)strtol({a}, 0, 8)"),
             "chmod" => {
                 let Some(second) = args.get(1) else {
