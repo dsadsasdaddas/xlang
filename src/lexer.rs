@@ -277,3 +277,81 @@ fn is_keyword(text: &str) -> bool {
             | "false"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lex(src: &str) -> (Vec<Token>, Vec<String>) {
+        let (toks, diags) = Lexer::new(src).tokenize();
+        let msgs = diags.items.iter().map(|d| d.message.clone()).collect();
+        (toks, msgs)
+    }
+
+    #[test]
+    fn lexes_numbers_idents_keywords() {
+        let (toks, diags) = lex("fn 42 x");
+        assert!(diags.is_empty(), "unexpected diags: {diags:?}");
+        assert_eq!(toks[0].kind, TokenKind::Keyword);
+        assert_eq!(toks[0].text, "fn");
+        assert_eq!(toks[1].kind, TokenKind::Int);
+        assert_eq!(toks[1].text, "42");
+        assert_eq!(toks[2].kind, TokenKind::Ident);
+        assert_eq!(toks[2].text, "x");
+    }
+
+    #[test]
+    fn recognizes_multi_char_symbols() {
+        let (toks, _) = lex("=> == != >= <= && || += -=");
+        let texts: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "=>", "==", "!=", ">=", "<=", "&&", "||", "+=", "-=", "<eof>"
+            ]
+        );
+    }
+
+    #[test]
+    fn byte_offsets_ascii() {
+        let (toks, _) = lex("ab 12");
+        assert_eq!((toks[0].start, toks[0].end), (0, 2), "ab span");
+        assert_eq!((toks[1].start, toks[1].end), (3, 5), "12 span");
+    }
+
+    #[test]
+    fn byte_offsets_count_multibyte_as_bytes() {
+        // `"中"` = `"`(1) + 中(3 bytes) + `"`(1) = bytes 0..5. A char-indexed
+        // lexer (the bug) would report 0..3 — this guards against that.
+        let (toks, _) = lex("\"中\"");
+        let s = toks
+            .iter()
+            .find(|t| t.kind == TokenKind::String)
+            .expect("a string token");
+        assert_eq!((s.start, s.end), (0, 5), "中 must count as 3 bytes");
+    }
+
+    #[test]
+    fn recovers_from_multiple_bad_chars() {
+        let (toks, diags) = lex("@ #");
+        assert_eq!(diags.len(), 2, "expected 2 lex errors, got {diags:?}");
+        assert!(toks.iter().any(|t| t.kind == TokenKind::Eof));
+    }
+
+    #[test]
+    fn reports_unterminated_string() {
+        let (_toks, diags) = lex("\"abc");
+        assert_eq!(diags.len(), 1, "got {diags:?}");
+        assert!(diags[0].contains("unterminated string"));
+    }
+
+    #[test]
+    fn string_escapes_are_decoded() {
+        let (toks, _) = lex("\"a\\nb\"");
+        let s = toks
+            .iter()
+            .find(|t| t.kind == TokenKind::String)
+            .expect("string token");
+        assert_eq!(s.text, "a\nb", "escape decoded into the token text");
+    }
+}
