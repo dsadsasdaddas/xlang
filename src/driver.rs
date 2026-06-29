@@ -71,7 +71,19 @@ pub fn parse_file(path: &Path) -> XResult<Program> {
         return Err(XError::Lex(msg));
     }
     let program = Parser::new(tokens, path.display().to_string()).parse()?;
-    check_program(&program)?;
+    let type_diags = check_program(&program);
+    if type_diags.has_errors() {
+        // M3b transitional: surface structured type diagnostics as a fatal error
+        // (messages joined) so legacy callers keep working. M4 wires the full
+        // Diagnostics through to the CLI as machine-readable output.
+        let msg = type_diags
+            .items
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(XError::Type(msg));
+    }
     Ok(program)
 }
 
