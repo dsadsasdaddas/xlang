@@ -3,7 +3,12 @@ module main
 // sort <file> — sort lines lexicographically (like GNU sort). Bubble sort on a
 // Vec<String> using str_cmp for ordering + vec_len for the count.
 fn main(): i32 {
-    let s: String = read_file(argv(1))
+    let mut s: String = ""
+    if argc() >= 2 {
+        s = read_file(argv(1))
+    } else {
+        s = read_stdin()
+    }
     let lines: Vec<String> = vec_new()
     let n: i32 = str_len(s)
     let mut start: i32 = 0

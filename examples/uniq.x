@@ -3,7 +3,12 @@ module main
 // uniq <file> — drop adjacent duplicate lines (like GNU uniq). First line
 // always printed; subsequent lines printed only if different from the previous.
 fn main(): i32 {
-    let s: String = read_file(argv(1))
+    let mut s: String = ""
+    if argc() >= 2 {
+        s = read_file(argv(1))
+    } else {
+        s = read_stdin()
+    }
     let n: i32 = str_len(s)
     let mut start: i32 = 0
     let mut prev: String = ""
