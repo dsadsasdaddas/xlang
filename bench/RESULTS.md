@@ -15,6 +15,15 @@
 
 xlang's compiled server is in the **same ballpark** as nginx for this trivial fixed-response workload (within ~1.0–1.5×).
 
+### Stronger load (multiprocess, bypasses the python GIL) — `bench/bench_mp.py`
+64-core box, 8 processes, new connection per request, 6s:
+| server            | req/s   |
+|-------------------|---------|
+| nginx 1.28        | ~8360   |
+| xlang (1 worker)  | ~8540   |
+
+Even under ~5× the load, xlang's **blocking** server stays level with nginx. For this minimal workload the per-connection work is so tiny that serializing connections does not yet cost throughput — both are bound by accept/loop rate (and likely still partly by the client).
+
 ## Honest caveats — this is NOT "xlang beats nginx"
 1. **Trivial workload** (5-byte fixed response). nginx's machinery overhead dominates when the work is tiny, so a minimal hand-written server can match it. Real workloads (file serving, proxying, keepalive, real HTTP parsing) would change the picture.
 2. **The load generator (python, threading + GIL) likely caps the measurement** around ~2000–2500 req/s — the client may be the bottleneck, so the true server ceilings are not reached.
