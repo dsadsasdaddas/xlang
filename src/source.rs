@@ -17,12 +17,20 @@ pub struct Span {
 
 impl Span {
     pub const fn new(file_id: u32, start: u32, end: u32) -> Self {
-        Self { file_id, start, end }
+        Self {
+            file_id,
+            start,
+            end,
+        }
     }
 
     /// Zero-length span at offset 0 — fallback when no real position is known.
     pub const fn unknown(file_id: u32) -> Self {
-        Self { file_id, start: 0, end: 0 }
+        Self {
+            file_id,
+            start: 0,
+            end: 0,
+        }
     }
 
     /// Smallest span covering both `self` and `other` (assumes same file).

@@ -229,16 +229,8 @@ mod tests {
     fn diagnostics_dedup_identical() {
         let mut diags = Diagnostics::new();
         let span = Span::new(0, 5, 10);
-        diags.push(Diagnostic::error(
-            ErrorCode::TypeUnknownVar,
-            span,
-            "x",
-        ));
-        diags.push(Diagnostic::error(
-            ErrorCode::TypeUnknownVar,
-            span,
-            "x",
-        ));
+        diags.push(Diagnostic::error(ErrorCode::TypeUnknownVar, span, "x"));
+        diags.push(Diagnostic::error(ErrorCode::TypeUnknownVar, span, "x"));
         assert_eq!(diags.items.len(), 1);
         // same code, different span → kept
         diags.push(Diagnostic::error(

@@ -275,10 +275,7 @@ impl Parser {
         } else {
             let start = self.cur_start();
             let expr = self.parse_expr()?;
-            Ok(Spanned::new(
-                Stmt::ExprStmt { expr },
-                self.span_from(start),
-            ))
+            Ok(Spanned::new(Stmt::ExprStmt { expr }, self.span_from(start)))
         }
     }
 

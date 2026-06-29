@@ -387,12 +387,7 @@ impl CGen {
         Ok(())
     }
 
-    fn gen_let_stmt(
-        &mut self,
-        name: &str,
-        ty: &TypeNode,
-        value: &Spanned<Expr>,
-    ) -> XResult<()> {
+    fn gen_let_stmt(&mut self, name: &str, ty: &TypeNode, value: &Spanned<Expr>) -> XResult<()> {
         if let Expr::ArrayLiteral { elements } = &value.node {
             self.gen_array_let_stmt(name, ty, elements)?;
         } else {

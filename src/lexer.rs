@@ -256,11 +256,7 @@ impl Lexer {
             }
         }
         // Unterminated string: report and continue (no token emitted).
-        let span = Span::new(
-            self.file_id,
-            start_byte as u32,
-            self.byte_offset as u32,
-        );
+        let span = Span::new(self.file_id, start_byte as u32, self.byte_offset as u32);
         self.diags.push(Diagnostic::error(
             ErrorCode::LexUnterminatedString,
             span,
