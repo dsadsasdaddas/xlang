@@ -402,7 +402,9 @@ impl CGen {
             unreachable!();
         };
         let ret = self.c_type(return_type)?;
-        let params_text = if params.is_empty() {
+        let params_text = if name == "main" && params.is_empty() {
+            "int argc, char** argv".to_string()
+        } else if params.is_empty() {
             "void".to_string()
         } else {
             let mut parts = Vec::new();
@@ -426,7 +428,10 @@ impl CGen {
             unreachable!();
         };
         let ret = self.c_type(return_type)?;
-        let params_text = if params.is_empty() {
+        let is_main = name == "main" && params.is_empty();
+        let params_text = if is_main {
+            "int argc, char** argv".to_string()
+        } else if params.is_empty() {
             "void".to_string()
         } else {
             let mut parts = Vec::new();
@@ -440,6 +445,10 @@ impl CGen {
         self.push_scope();
         for param in params {
             self.declare_var(&param.name, param.ty.clone());
+        }
+        if is_main {
+            self.emit("__xlang_argc_g = argc;");
+            self.emit("__xlang_argv_g = argv;");
         }
         self.fn_return = Some(return_type.clone());
         for stmt in &body.statements {
@@ -812,6 +821,8 @@ impl CGen {
     /// -Wunused-function.
     fn emit_runtime_preamble(&mut self) {
         let lines = [
+            "int __xlang_argc_g = 0;",
+            "char** __xlang_argv_g = 0;",
             "char* __xlang_str_concat(const char* a, const char* b) {",
             "    size_t la = strlen(a), lb = strlen(b);",
             "    char* out = (char*)malloc(la + lb + 1);",
@@ -913,6 +924,8 @@ impl CGen {
         let a = self.gen_expr(first)?;
         let rendered = match name.as_str() {
             "str_len" => format!("(int32_t)strlen({a})"),
+            "argv" => format!("__xlang_argv_g[{a}]"),
+            "print_raw" => format!("printf(\"%s\", {a})"),
             "int_to_str" => format!("__xlang_int_to_str({a})"),
             "str_concat" => {
                 let Some(second) = args.get(1) else {
@@ -1013,6 +1026,7 @@ impl CGen {
         Ok(Some(match name.as_str() {
             "fork" => "fork()".to_string(),
             "getpid" => "getpid()".to_string(),
+            "argc" => "(__xlang_argc_g)".to_string(),
             _ => return Ok(None),
         }))
     }
