@@ -928,6 +928,7 @@ impl CGen {
             "#include <netinet/in.h>",
             "#include <arpa/inet.h>",
             "#include <dirent.h>",
+            "#include <sys/stat.h>",
             "int32_t __xlang_tcp_listen(int32_t port) {",
             "    int fd = socket(AF_INET, SOCK_STREAM, 0);",
             "    int opt = 1;",
@@ -971,6 +972,11 @@ impl CGen {
             "    }",
             "    closedir(d);",
             "    return \"\";",
+            "}",
+            "int32_t __xlang_is_dir(const char* path) {",
+            "    struct stat st;",
+            "    if (stat(path, &st) != 0) return 0;",
+            "    return S_ISDIR(st.st_mode) ? 1 : 0;",
             "}",
             "#endif",
             "",
@@ -1045,6 +1051,7 @@ impl CGen {
                 format!("(int32_t)(unsigned char)({a}[{b}])")
             }
             "dir_count" => format!("__xlang_dir_count({a})"),
+            "is_dir" => format!("__xlang_is_dir({a})"),
             "dir_entry" => {
                 let Some(second) = args.get(1) else {
                     return Ok(None);
