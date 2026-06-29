@@ -44,6 +44,15 @@ The gap **reversed**: from 8.5× slower (1 blocking worker, ~8.2k) to ~1.67× **
 
 **Honest caveat:** this is a trivial fixed-response workload where a minimal server can beat nginx — nginx does full HTTP parsing + header generation + module chain per request, while xlang blasts a fixed 5-byte string. Real workloads (request parsing, routing, file serving) would rebalance this. Still: xlang → C → prefork is genuinely fast, and the modify-x cycle produced a measured, reproducible improvement.
 
+### Realistic workload: serve a 64 KB file — sendfile vs read+send
+`examples/server_file.x` (prefork, `read_file` + `str_concat` + `send`, userspace copies) vs nginx serving the same file via **sendfile** (zero-copy). 16 keepalive conns; both verified serving exactly 65536 bytes:
+| server              | req/s   | ~throughput |
+|---------------------|---------|-------------|
+| nginx (sendfile)    | ~25,600 | ~1.6 GB/s   |
+| xlang (read+send)   | ~22,700 | ~1.4 GB/s   |
+
+xlang is only **~13% slower** than nginx for 64 KB file serving — far smaller than expected. At 64 KB/request over loopback the workload is **bandwidth-bound** (~1.5 GB/s), so sendfile's zero-copy advantage is dwarfed by the transfer time; xlang's per-request page-cached read + memcpy-concat is efficient enough. (sendfile would win more for many small files at very high request rates, where per-request overhead dominates.)
+
 ## Honest caveats — this is NOT "xlang beats nginx"
 1. **Trivial workload** (5-byte fixed response). nginx's machinery overhead dominates when the work is tiny, so a minimal hand-written server can match it. Real workloads (file serving, proxying, keepalive, real HTTP parsing) would change the picture.
 2. **The load generator (python, threading + GIL) likely caps the measurement** around ~2000–2500 req/s — the client may be the bottleneck, so the true server ceilings are not reached.
