@@ -881,6 +881,7 @@ impl CGen {
             "#include <sys/socket.h>",
             "#include <netinet/in.h>",
             "#include <arpa/inet.h>",
+            "#include <dirent.h>",
             "int32_t __xlang_tcp_listen(int32_t port) {",
             "    int fd = socket(AF_INET, SOCK_STREAM, 0);",
             "    int opt = 1;",
@@ -899,6 +900,31 @@ impl CGen {
             "    if (n < 0) n = 0;",
             "    buf[n] = 0;",
             "    return buf;",
+            "}",
+            "int32_t __xlang_dir_count(const char* path) {",
+            "    DIR* d = opendir(path);",
+            "    if (!d) return 0;",
+            "    int32_t n = 0;",
+            "    while (readdir(d)) n++;",
+            "    closedir(d);",
+            "    return n;",
+            "}",
+            "char* __xlang_dir_entry(const char* path, int32_t idx) {",
+            "    DIR* d = opendir(path);",
+            "    if (!d) return \"\";",
+            "    struct dirent* e;",
+            "    int32_t i = 0;",
+            "    while ((e = readdir(d))) {",
+            "        if (i == idx) {",
+            "            char* copy = (char*)malloc(strlen(e->d_name) + 1);",
+            "            strcpy(copy, e->d_name);",
+            "            closedir(d);",
+            "            return copy;",
+            "        }",
+            "        i++;",
+            "    }",
+            "    closedir(d);",
+            "    return \"\";",
             "}",
             "#endif",
             "",
@@ -962,6 +988,14 @@ impl CGen {
                 };
                 let b = self.gen_expr(second)?;
                 format!("(int32_t)(unsigned char)({a}[{b}])")
+            }
+            "dir_count" => format!("__xlang_dir_count({a})"),
+            "dir_entry" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_dir_entry({a}, {b})")
             }
             "read_file" => format!("__xlang_read_file({a})"),
             "write_file" => {
