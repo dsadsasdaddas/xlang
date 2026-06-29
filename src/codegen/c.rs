@@ -1120,6 +1120,13 @@ impl CGen {
                 let b = self.gen_expr(second)?;
                 format!("link(({a}), ({b}))")
             }
+            "truncate_file" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("truncate(({a}), ({b}))")
+            }
             "str_to_int_oct" => format!("(int32_t)strtol({a}, 0, 8)"),
             "chmod" => {
                 let Some(second) = args.get(1) else {
