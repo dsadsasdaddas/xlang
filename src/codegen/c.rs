@@ -892,6 +892,13 @@ impl CGen {
             "    out[n] = 0;",
             "    return out;",
             "}",
+            "char* __xlang_read_line() {",
+            "    char* buf = (char*)malloc(65536);",
+            "    if (!fgets(buf, 65536, stdin)) { buf[0] = 0; return buf; }",
+            "    int32_t n = (int32_t)strlen(buf);",
+            "    if (n > 0 && buf[n - 1] == '\\n') buf[n - 1] = 0;",
+            "    return buf;",
+            "}",
             "",
         ];
         for line in lines {
@@ -1045,6 +1052,7 @@ impl CGen {
             "vec_len" => format!("((int32_t)({a}).len)"),
             "str_to_int" => format!("(int32_t)strtol({a}, 0, 10)"),
             "remove_file" => format!("remove({a})"),
+            "system" => format!("system({a})"),
             "rename_file" => {
                 let Some(second) = args.get(1) else {
                     return Ok(None);
@@ -1124,6 +1132,7 @@ impl CGen {
             "getpid" => "getpid()".to_string(),
             "argc" => "(__xlang_argc_g)".to_string(),
             "read_stdin" => "__xlang_read_stdin()".to_string(),
+            "read_line" => "__xlang_read_line()".to_string(),
             _ => return Ok(None),
         }))
     }
