@@ -3,7 +3,7 @@ module main
 // sort [file] — sort lines (like GNU sort). Uses quicksort (O(n log n)) for
 // competitive performance; the Vec is sorted in place via index assignment
 // (the data pointer is shared across the value-copy).
-fn quicksort(lines: Vec<String>, lo: i32, hi: i32) {
+fn quicksort(lines: Vec<String>, lo: i32, hi: i32): i32 {
     if lo < hi {
         let pivot: String = lines[hi]
         let mut i: i32 = lo - 1
@@ -24,6 +24,7 @@ fn quicksort(lines: Vec<String>, lo: i32, hi: i32) {
         quicksort(lines, lo, i - 1)
         quicksort(lines, i + 1, hi)
     }
+    return 0
 }
 
 fn main(): i32 {
