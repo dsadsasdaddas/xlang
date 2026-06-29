@@ -1128,6 +1128,7 @@ impl CGen {
                 format!("truncate(({a}), ({b}))")
             }
             "mkfifo" => format!("mkfifo(({a}), 0644)"),
+            "rmdir" => format!("rmdir(({a}))"),
             "str_to_int_oct" => format!("(int32_t)strtol({a}, 0, 8)"),
             "chmod" => {
                 let Some(second) = args.get(1) else {
