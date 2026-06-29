@@ -178,6 +178,38 @@ impl CGen {
                 format!("typedef struct {{\n    {elem_c_type} data[{len}];\n}} {alias};")
             });
         }
+        if name == "Option" {
+            if args.len() != 1 {
+                return Err(XError::Codegen(format!(
+                    "Option expects exactly one type argument, got {}",
+                    args.len()
+                )));
+            }
+            let payload_ty = &args[0];
+            let alias = self.c_type(ty)?;
+            let payload_c = self.c_type(payload_ty)?;
+            typedefs.entry(alias.clone()).or_insert_with(|| {
+                format!("typedef struct {{\n    bool some;\n    {payload_c} value;\n}} {alias};")
+            });
+        }
+        if name == "Result" {
+            if args.len() != 2 {
+                return Err(XError::Codegen(format!(
+                    "Result expects exactly two type arguments, got {}",
+                    args.len()
+                )));
+            }
+            let ok_ty = &args[0];
+            let err_ty = &args[1];
+            let alias = self.c_type(ty)?;
+            let ok_c = self.c_type(ok_ty)?;
+            let err_c = self.c_type(err_ty)?;
+            typedefs.entry(alias.clone()).or_insert_with(|| {
+                format!(
+                    "typedef struct {{\n    bool ok;\n    {ok_c} value;\n    {err_c} error;\n}} {alias};"
+                )
+            });
+        }
         Ok(())
     }
 
@@ -202,6 +234,16 @@ impl CGen {
                 self.c_type_suffix(&args[0])?,
                 self.const_type_arg_value(&args[1], "Array length")?
             )),
+            TypeNode::TypeExpr { name, args } if name == "Option" && args.len() == 1 => {
+                Ok(format!("Option_{}", self.c_type_suffix(&args[0])?))
+            }
+            TypeNode::TypeExpr { name, args } if name == "Result" && args.len() == 2 => {
+                Ok(format!(
+                    "Result_{}_{}",
+                    self.c_type_suffix(&args[0])?,
+                    self.c_type_suffix(&args[1])?
+                ))
+            }
             TypeNode::TypeExpr { name, .. } => Err(XError::Codegen(format!(
                 "C backend does not support generic type yet: {name}<...>"
             ))),
@@ -227,6 +269,16 @@ impl CGen {
                 self.c_type_suffix(&args[0])?,
                 self.const_type_arg_value(&args[1], "Array length")?
             )),
+            TypeNode::TypeExpr { name, args } if name == "Option" && args.len() == 1 => {
+                Ok(format!("Option_{}", self.c_type_suffix(&args[0])?))
+            }
+            TypeNode::TypeExpr { name, args } if name == "Result" && args.len() == 2 => {
+                Ok(format!(
+                    "Result_{}_{}",
+                    self.c_type_suffix(&args[0])?,
+                    self.c_type_suffix(&args[1])?
+                ))
+            }
             TypeNode::TypeExpr { name, .. } => Err(XError::Codegen(format!(
                 "C backend does not support {name}<...> as a generated type suffix yet"
             ))),
@@ -377,12 +429,7 @@ impl CGen {
             Stmt::ExprStmt { expr } => self.emit(&format!("{};", self.gen_expr(expr)?)),
             Stmt::BreakStmt => self.emit("break;"),
             Stmt::ContinueStmt => self.emit("continue;"),
-            Stmt::MatchStmt { .. } => {
-                return Err(XError::Codegen(format!(
-                    "C backend does not support statement yet: {:?}",
-                    stmt_kind(&stmt.node)
-                )));
-            }
+            Stmt::MatchStmt { value, arms } => self.gen_match_stmt(value, arms)?,
         }
         Ok(())
     }
@@ -498,6 +545,95 @@ impl CGen {
         Ok(())
     }
 
+    /// Lower `match scrut { Some/Ok(v) => .., None/Err(..) => .. }` to a C
+    /// `if/else` on the discriminant. v1: `scrut` must be a variable of type
+    /// `Option<T>` or `Result<T, E>`.
+    fn gen_match_stmt(&mut self, value: &Spanned<Expr>, arms: &[MatchArm]) -> XResult<()> {
+        let Expr::Identifier { name: scrut_name } = &value.node else {
+            return Err(XError::Codegen(
+                "match currently supports only a variable (identifier) scrutinee".to_string(),
+            ));
+        };
+        let Some(TypeNode::TypeExpr {
+            name: ty_name,
+            args,
+        }) = self.lookup_var(scrut_name).cloned()
+        else {
+            return Err(XError::Codegen(format!(
+                "match scrutinee {scrut_name:?} is not a typed variable"
+            )));
+        };
+        let is_option = match (ty_name.as_str(), args.len()) {
+            ("Option", 1) => true,
+            ("Result", 2) => false,
+            _ => {
+                return Err(XError::Codegen(format!(
+                    "match supports Option<T> / Result<T, E>, got {ty_name}"
+                )));
+            }
+        };
+        let discriminant = if is_option { "some" } else { "ok" };
+        let payload_ty = args[0].clone();
+        let err_ty = if is_option {
+            None
+        } else {
+            Some(args[1].clone())
+        };
+
+        let mut positive: Option<&MatchArm> = None;
+        let mut negative: Option<&MatchArm> = None;
+        for arm in arms {
+            let Pattern::VariantPattern { name, .. } = &arm.pattern;
+            match name.as_str() {
+                "Some" | "Ok" => positive = Some(arm),
+                "None" | "Err" => negative = Some(arm),
+                other => {
+                    return Err(XError::Codegen(format!(
+                        "C backend does not support match variant {other:?}"
+                    )));
+                }
+            }
+        }
+
+        let scrut_c = self.gen_expr(value)?;
+        self.emit(&format!("if ({scrut_c}.{discriminant}) {{"));
+        self.indent += 1;
+        self.push_scope();
+        if let Some(arm) = positive {
+            let Pattern::VariantPattern { bindings, .. } = &arm.pattern;
+            if let Some(binding) = bindings.first() {
+                let payload_c = self.c_type(&payload_ty)?;
+                self.declare_var(binding, payload_ty.clone());
+                self.emit(&format!("{payload_c} {binding} = {scrut_c}.value;"));
+            }
+            for inner in &arm.body.statements {
+                self.gen_stmt(inner)?;
+            }
+        }
+        self.pop_scope();
+        self.indent -= 1;
+        if let Some(arm) = negative {
+            self.emit("} else {");
+            self.indent += 1;
+            self.push_scope();
+            if let Some(err_ty) = &err_ty {
+                let Pattern::VariantPattern { bindings, .. } = &arm.pattern;
+                if let Some(binding) = bindings.first() {
+                    let err_c = self.c_type(err_ty)?;
+                    self.declare_var(binding, err_ty.clone());
+                    self.emit(&format!("{err_c} {binding} = {scrut_c}.error;"));
+                }
+            }
+            for inner in &arm.body.statements {
+                self.gen_stmt(inner)?;
+            }
+            self.pop_scope();
+            self.indent -= 1;
+        }
+        self.emit("}");
+        Ok(())
+    }
+
     fn gen_expr(&self, expr: &Spanned<Expr>) -> XResult<String> {
         match &expr.node {
             Expr::IntLiteral { value } | Expr::FloatLiteral { value } => Ok(value.clone()),
@@ -531,19 +667,5 @@ impl CGen {
                 Ok(format!("{}.{}", self.gen_expr(object)?, field))
             }
         }
-    }
-}
-
-fn stmt_kind(stmt: &Stmt) -> &'static str {
-    match stmt {
-        Stmt::LetStmt { .. } => "LetStmt",
-        Stmt::IfStmt { .. } => "IfStmt",
-        Stmt::ForStmt { .. } => "ForStmt",
-        Stmt::WhileStmt { .. } => "WhileStmt",
-        Stmt::MatchStmt { .. } => "MatchStmt",
-        Stmt::ReturnStmt { .. } => "ReturnStmt",
-        Stmt::BreakStmt => "BreakStmt",
-        Stmt::ContinueStmt => "ContinueStmt",
-        Stmt::ExprStmt { .. } => "ExprStmt",
     }
 }
