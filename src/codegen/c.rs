@@ -1064,6 +1064,21 @@ impl CGen {
             "is_dir" => format!("__xlang_is_dir({a})"),
             "file_size" => format!("__xlang_file_size({a})"),
             "make_dir" => format!("mkdir({a}, 0755)"),
+            "str_to_int_oct" => format!("(int32_t)strtol({a}, 0, 8)"),
+            "chmod" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("chmod(({a}), ({b}))")
+            }
+            "symlink" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("symlink(({a}), ({b}))")
+            }
             "dir_entry" => {
                 let Some(second) = args.get(1) else {
                     return Ok(None);
