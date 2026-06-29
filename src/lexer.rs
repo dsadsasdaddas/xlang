@@ -1,4 +1,5 @@
-use crate::error::{XError, XResult};
+use crate::error::{Diagnostic, Diagnostics, ErrorCode};
+use crate::source::Span;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TokenKind {
@@ -11,20 +12,28 @@ pub(crate) enum TokenKind {
     Eof,
 }
 
+/// A lexed token. Position is byte offsets only (`start` inclusive, `end`
+/// exclusive); line/column are derived on demand via `LineIndex`, so bytes are
+/// the single source of truth.
 #[derive(Clone, Debug)]
 pub(crate) struct Token {
     pub(crate) kind: TokenKind,
     pub(crate) text: String,
-    pub(crate) line: usize,
-    pub(crate) col: usize,
+    /// Byte offset of the first character of the token (inclusive).
+    pub(crate) start: u32,
+    /// Byte offset just past the last character of the token (exclusive).
+    pub(crate) end: u32,
 }
 
 pub struct Lexer {
     chars: Vec<char>,
     i: usize,
-    line: usize,
-    col: usize,
+    /// Byte offset in the original source (advances by `char.len_utf8()` per
+    /// consumed char, so it stays correct for non-ASCII — unlike the char index `i`).
+    byte_offset: usize,
     tokens: Vec<Token>,
+    diags: Diagnostics,
+    file_id: u32,
 }
 
 impl Lexer {
@@ -32,13 +41,19 @@ impl Lexer {
         Self {
             chars: source.chars().collect(),
             i: 0,
-            line: 1,
-            col: 1,
+            byte_offset: 0,
             tokens: Vec::new(),
+            diags: Diagnostics::new(),
+            file_id: 0,
         }
     }
 
-    pub(crate) fn tokenize(mut self) -> XResult<Vec<Token>> {
+    /// Tokenize, accumulating diagnostics instead of bailing at the first bad
+    /// character. Returns `(tokens, diagnostics)`; an unexpected character is
+    /// reported and skipped so later errors are still surfaced (multi-error
+    /// recovery). The returned token stream is always produced (up to the point
+    /// the lexer reached), even when diagnostics are present.
+    pub(crate) fn tokenize(mut self) -> (Vec<Token>, Diagnostics) {
         while !self.is_eof() {
             let ch = self.peek_char(0);
 
@@ -65,7 +80,7 @@ impl Lexer {
             }
 
             if ch == '"' {
-                self.lex_string()?;
+                self.lex_string();
                 continue;
             }
 
@@ -81,19 +96,25 @@ impl Lexer {
                 continue;
             }
 
-            return Err(XError::Lex(format!(
-                "unexpected character {ch:?} at {}:{}",
-                self.line, self.col
-            )));
+            // Unexpected character: report it and skip, then keep going so we
+            // can surface more than one lex error per file.
+            let span = self.span_here(ch.len_utf8());
+            self.diags.push(Diagnostic::error(
+                ErrorCode::LexUnexpectedChar,
+                span,
+                format!("unexpected character {ch:?}"),
+            ));
+            self.advance();
         }
 
+        let end = self.byte_offset as u32;
         self.tokens.push(Token {
             kind: TokenKind::Eof,
             text: "<eof>".to_string(),
-            line: self.line,
-            col: self.col,
+            start: end,
+            end,
         });
-        Ok(self.tokens)
+        (self.tokens, self.diags)
     }
 
     fn is_eof(&self) -> bool {
@@ -107,35 +128,37 @@ impl Lexer {
     fn advance(&mut self) -> char {
         let ch = self.chars[self.i];
         self.i += 1;
-        if ch == '\n' {
-            self.line += 1;
-            self.col = 1;
-        } else {
-            self.col += 1;
-        }
+        self.byte_offset += ch.len_utf8();
         ch
     }
 
+    /// Span covering the next `len` bytes starting at the current position.
+    fn span_here(&self, len: usize) -> Span {
+        let start = self.byte_offset as u32;
+        Span::new(self.file_id, start, start + len as u32)
+    }
+
     fn push(&mut self, kind: TokenKind, text: String) {
-        let width = text.chars().count();
+        let end = self.byte_offset as u32;
+        let start = end.saturating_sub(text.len() as u32);
         self.tokens.push(Token {
             kind,
             text,
-            line: self.line,
-            col: self.col.saturating_sub(width),
+            start,
+            end,
         });
     }
 
     fn lex_ident(&mut self) {
-        let start_line = self.line;
-        let start_col = self.col;
-        let start = self.i;
+        let start_byte = self.byte_offset;
+        let start_idx = self.i;
         while !self.is_eof()
             && (self.peek_char(0).is_ascii_alphanumeric() || self.peek_char(0) == '_')
         {
             self.advance();
         }
-        let text: String = self.chars[start..self.i].iter().collect();
+        let text: String = self.chars[start_idx..self.i].iter().collect();
+        let end_byte = self.byte_offset;
         let kind = if is_keyword(&text) {
             TokenKind::Keyword
         } else {
@@ -144,15 +167,14 @@ impl Lexer {
         self.tokens.push(Token {
             kind,
             text,
-            line: start_line,
-            col: start_col,
+            start: start_byte as u32,
+            end: end_byte as u32,
         });
     }
 
     fn lex_number(&mut self) {
-        let start_line = self.line;
-        let start_col = self.col;
-        let start = self.i;
+        let start_byte = self.byte_offset;
+        let start_idx = self.i;
         while !self.is_eof() && self.peek_char(0).is_ascii_digit() {
             self.advance();
         }
@@ -164,30 +186,31 @@ impl Lexer {
                 self.advance();
             }
         }
-        let text: String = self.chars[start..self.i].iter().collect();
+        let text: String = self.chars[start_idx..self.i].iter().collect();
+        let end_byte = self.byte_offset;
         self.tokens.push(Token {
             kind,
             text,
-            line: start_line,
-            col: start_col,
+            start: start_byte as u32,
+            end: end_byte as u32,
         });
     }
 
-    fn lex_string(&mut self) -> XResult<()> {
-        let start_line = self.line;
-        let start_col = self.col;
+    fn lex_string(&mut self) {
+        let start_byte = self.byte_offset;
         self.advance(); // opening quote
         let mut value = String::new();
         while !self.is_eof() {
             let ch = self.advance();
             if ch == '"' {
+                let end_byte = self.byte_offset;
                 self.tokens.push(Token {
                     kind: TokenKind::String,
                     text: value,
-                    line: start_line,
-                    col: start_col,
+                    start: start_byte as u32,
+                    end: end_byte as u32,
                 });
-                return Ok(());
+                return;
             }
             if ch == '\\' {
                 if self.is_eof() {
@@ -206,16 +229,22 @@ impl Lexer {
                 value.push(ch);
             }
         }
-        Err(XError::Lex(format!(
-            "unterminated string at {start_line}:{start_col}"
-        )))
+        // Unterminated string: report and continue (no token emitted).
+        let span = Span::new(self.file_id, start_byte as u32, self.byte_offset as u32);
+        self.diags.push(Diagnostic::error(
+            ErrorCode::LexUnterminatedString,
+            span,
+            "unterminated string literal",
+        ));
     }
 
     fn match_multi_symbol(&mut self) -> Option<String> {
-        for sym in ["=>", "==", "!=", ">=", "<=", "&&", "||"] {
-            let chars: Vec<char> = sym.chars().collect();
-            if self.chars.get(self.i..self.i + chars.len()) == Some(chars.as_slice()) {
-                for _ in 0..chars.len() {
+        for sym in [
+            "=>", "==", "!=", ">=", "<=", "&&", "||", "+=", "-=", "*=", "/=", "%=",
+        ] {
+            let sym_chars: Vec<char> = sym.chars().collect();
+            if self.chars.get(self.i..self.i + sym_chars.len()) == Some(sym_chars.as_slice()) {
+                for _ in 0..sym_chars.len() {
                     self.advance();
                 }
                 return Some(sym.to_string());

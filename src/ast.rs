@@ -1,3 +1,4 @@
+use crate::source::Spanned;
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -5,7 +6,7 @@ pub struct Program {
     pub kind: &'static str,
     pub module: ModuleDecl,
     pub imports: Vec<ImportDecl>,
-    pub items: Vec<Item>,
+    pub items: Vec<Spanned<Item>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -60,7 +61,7 @@ pub struct Param {
 #[derive(Clone, Debug, Serialize)]
 pub struct Block {
     pub kind: &'static str,
-    pub statements: Vec<Stmt>,
+    pub statements: Vec<Spanned<Stmt>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -71,10 +72,10 @@ pub enum Stmt {
         name: String,
         #[serde(rename = "type")]
         ty: TypeNode,
-        value: Expr,
+        value: Spanned<Expr>,
     },
     IfStmt {
-        condition: Expr,
+        condition: Spanned<Expr>,
         #[serde(rename = "thenBlock")]
         then_block: Block,
         #[serde(rename = "elseBranch")]
@@ -82,24 +83,24 @@ pub enum Stmt {
     },
     ForStmt {
         iterator: String,
-        iterable: Expr,
+        iterable: Spanned<Expr>,
         body: Block,
     },
     WhileStmt {
-        condition: Expr,
+        condition: Spanned<Expr>,
         body: Block,
     },
     MatchStmt {
-        value: Expr,
+        value: Spanned<Expr>,
         arms: Vec<MatchArm>,
     },
     ReturnStmt {
-        value: Option<Expr>,
+        value: Option<Spanned<Expr>>,
     },
     BreakStmt,
     ContinueStmt,
     ExprStmt {
-        expr: Expr,
+        expr: Spanned<Expr>,
     },
 }
 
@@ -107,7 +108,7 @@ pub enum Stmt {
 #[serde(untagged)]
 pub enum ElseBranch {
     Block(Block),
-    IfStmt(Box<Stmt>),
+    IfStmt(Box<Spanned<Stmt>>),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -131,6 +132,13 @@ pub enum TypeNode {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct StructLiteralField {
+    pub kind: &'static str,
+    pub name: String,
+    pub value: Spanned<Expr>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind")]
 pub enum Expr {
     IntLiteral {
@@ -149,27 +157,31 @@ pub enum Expr {
         name: String,
     },
     ArrayLiteral {
-        elements: Vec<Expr>,
+        elements: Vec<Spanned<Expr>>,
     },
     BinaryExpr {
         op: String,
-        left: Box<Expr>,
-        right: Box<Expr>,
+        left: Box<Spanned<Expr>>,
+        right: Box<Spanned<Expr>>,
     },
     UnaryExpr {
         op: String,
-        value: Box<Expr>,
+        value: Box<Spanned<Expr>>,
     },
     AssignmentExpr {
-        target: Box<Expr>,
-        value: Box<Expr>,
+        target: Box<Spanned<Expr>>,
+        value: Box<Spanned<Expr>>,
     },
     CallExpr {
-        callee: Box<Expr>,
-        args: Vec<Expr>,
+        callee: Box<Spanned<Expr>>,
+        args: Vec<Spanned<Expr>>,
     },
     FieldAccessExpr {
-        object: Box<Expr>,
+        object: Box<Spanned<Expr>>,
         field: String,
+    },
+    StructLiteral {
+        name: String,
+        fields: Vec<StructLiteralField>,
     },
 }

@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::error::{XError, XResult};
-use std::collections::{BTreeMap, HashMap};
+use crate::source::Spanned;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Default)]
 pub struct CGen {
@@ -8,6 +9,11 @@ pub struct CGen {
     indent: usize,
     scopes: Vec<HashMap<String, TypeNode>>,
     temp_counter: usize,
+    /// Return type of the function currently being generated (for constructing
+    /// Some/None/Ok/Err in `return` position).
+    fn_return: Option<TypeNode>,
+    /// User-defined struct names (so `c_type` recognises them as value types).
+    struct_names: HashSet<String>,
 }
 
 impl CGen {
@@ -16,6 +22,11 @@ impl CGen {
     }
 
     pub fn generate(mut self, program: &Program) -> XResult<String> {
+        for item in &program.items {
+            if let Item::StructDecl { name, .. } = &item.node {
+                self.struct_names.insert(name.clone());
+            }
+        }
         self.emit("#include <stdint.h>");
         self.emit("#include <stdbool.h>");
         self.emit("#include <stddef.h>");
@@ -29,16 +40,16 @@ impl CGen {
         }
 
         for item in &program.items {
-            if let Item::StructDecl { .. } = item {
-                self.gen_struct(item)?;
+            if let Item::StructDecl { .. } = &item.node {
+                self.gen_struct(&item.node)?;
                 self.emit("");
             }
         }
 
         for item in &program.items {
-            match item {
+            match &item.node {
                 Item::FnDecl { .. } => {
-                    self.gen_fn(item)?;
+                    self.gen_fn(&item.node)?;
                     self.emit("");
                 }
                 Item::StructDecl { .. } | Item::TypeAliasDecl { .. } => {}
@@ -56,7 +67,7 @@ impl CGen {
     fn collect_runtime_typedefs(&self, program: &Program) -> XResult<Vec<String>> {
         let mut typedefs = BTreeMap::new();
         for item in &program.items {
-            match item {
+            match &item.node {
                 Item::StructDecl { fields, .. } => {
                     for field in fields {
                         self.collect_type_typedefs(&field.ty, &mut typedefs)?;
@@ -88,7 +99,7 @@ impl CGen {
         typedefs: &mut BTreeMap<String, String>,
     ) -> XResult<()> {
         for stmt in &block.statements {
-            match stmt {
+            match &stmt.node {
                 Stmt::LetStmt { ty, .. } => self.collect_type_typedefs(ty, typedefs)?,
                 Stmt::IfStmt {
                     then_block,
@@ -125,7 +136,7 @@ impl CGen {
 
     fn collect_stmt_typedefs(
         &self,
-        stmt: &Stmt,
+        stmt: &Spanned<Stmt>,
         typedefs: &mut BTreeMap<String, String>,
     ) -> XResult<()> {
         self.collect_block_typedefs(
@@ -177,6 +188,38 @@ impl CGen {
                 format!("typedef struct {{\n    {elem_c_type} data[{len}];\n}} {alias};")
             });
         }
+        if name == "Option" {
+            if args.len() != 1 {
+                return Err(XError::Codegen(format!(
+                    "Option expects exactly one type argument, got {}",
+                    args.len()
+                )));
+            }
+            let payload_ty = &args[0];
+            let alias = self.c_type(ty)?;
+            let payload_c = self.c_type(payload_ty)?;
+            typedefs.entry(alias.clone()).or_insert_with(|| {
+                format!("typedef struct {{\n    bool some;\n    {payload_c} value;\n}} {alias};")
+            });
+        }
+        if name == "Result" {
+            if args.len() != 2 {
+                return Err(XError::Codegen(format!(
+                    "Result expects exactly two type arguments, got {}",
+                    args.len()
+                )));
+            }
+            let ok_ty = &args[0];
+            let err_ty = &args[1];
+            let alias = self.c_type(ty)?;
+            let ok_c = self.c_type(ok_ty)?;
+            let err_c = self.c_type(err_ty)?;
+            typedefs.entry(alias.clone()).or_insert_with(|| {
+                format!(
+                    "typedef struct {{\n    bool ok;\n    {ok_c} value;\n    {err_c} error;\n}} {alias};"
+                )
+            });
+        }
         Ok(())
     }
 
@@ -189,6 +232,7 @@ impl CGen {
                 "f64" => Ok("double".to_string()),
                 "bool" => Ok("bool".to_string()),
                 "String" | "Str" => Ok("const char *".to_string()),
+                other if self.struct_names.contains(other) => Ok(other.to_string()),
                 other => Err(XError::Codegen(format!(
                     "C backend does not support type yet: {other}"
                 ))),
@@ -201,6 +245,16 @@ impl CGen {
                 self.c_type_suffix(&args[0])?,
                 self.const_type_arg_value(&args[1], "Array length")?
             )),
+            TypeNode::TypeExpr { name, args } if name == "Option" && args.len() == 1 => {
+                Ok(format!("Option_{}", self.c_type_suffix(&args[0])?))
+            }
+            TypeNode::TypeExpr { name, args } if name == "Result" && args.len() == 2 => {
+                Ok(format!(
+                    "Result_{}_{}",
+                    self.c_type_suffix(&args[0])?,
+                    self.c_type_suffix(&args[1])?
+                ))
+            }
             TypeNode::TypeExpr { name, .. } => Err(XError::Codegen(format!(
                 "C backend does not support generic type yet: {name}<...>"
             ))),
@@ -214,6 +268,7 @@ impl CGen {
         match ty {
             TypeNode::TypeExpr { name, args } if args.is_empty() => match name.as_str() {
                 "i32" | "i64" | "f32" | "f64" | "bool" | "String" | "Str" => Ok(name.clone()),
+                other if self.struct_names.contains(other) => Ok(other.to_string()),
                 other => Err(XError::Codegen(format!(
                     "C backend does not support {other} as a generated type suffix yet"
                 ))),
@@ -226,6 +281,16 @@ impl CGen {
                 self.c_type_suffix(&args[0])?,
                 self.const_type_arg_value(&args[1], "Array length")?
             )),
+            TypeNode::TypeExpr { name, args } if name == "Option" && args.len() == 1 => {
+                Ok(format!("Option_{}", self.c_type_suffix(&args[0])?))
+            }
+            TypeNode::TypeExpr { name, args } if name == "Result" && args.len() == 2 => {
+                Ok(format!(
+                    "Result_{}_{}",
+                    self.c_type_suffix(&args[0])?,
+                    self.c_type_suffix(&args[1])?
+                ))
+            }
             TypeNode::TypeExpr { name, .. } => Err(XError::Codegen(format!(
                 "C backend does not support {name}<...> as a generated type suffix yet"
             ))),
@@ -308,22 +373,34 @@ impl CGen {
         for param in params {
             self.declare_var(&param.name, param.ty.clone());
         }
+        self.fn_return = Some(return_type.clone());
         for stmt in &body.statements {
             self.gen_stmt(stmt)?;
         }
+        self.fn_return = None;
         self.pop_scope();
         self.indent -= 1;
         self.emit("}");
         Ok(())
     }
 
-    fn gen_stmt(&mut self, stmt: &Stmt) -> XResult<()> {
-        match stmt {
+    fn gen_stmt(&mut self, stmt: &Spanned<Stmt>) -> XResult<()> {
+        match &stmt.node {
             Stmt::LetStmt {
                 name, ty, value, ..
             } => self.gen_let_stmt(name, ty, value)?,
             Stmt::ReturnStmt { value } => match value {
-                Some(expr) => self.emit(&format!("return {};", self.gen_expr(expr)?)),
+                Some(expr) => {
+                    let rendered = if let Some(ret_ty) = &self.fn_return {
+                        match self.try_constructor(ret_ty, expr)? {
+                            Some(c) => c,
+                            None => self.gen_expr(expr)?,
+                        }
+                    } else {
+                        self.gen_expr(expr)?
+                    };
+                    self.emit(&format!("return {rendered};"));
+                }
                 None => self.emit("return;"),
             },
             Stmt::IfStmt {
@@ -376,19 +453,64 @@ impl CGen {
             Stmt::ExprStmt { expr } => self.emit(&format!("{};", self.gen_expr(expr)?)),
             Stmt::BreakStmt => self.emit("break;"),
             Stmt::ContinueStmt => self.emit("continue;"),
-            Stmt::MatchStmt { .. } => {
-                return Err(XError::Codegen(format!(
-                    "C backend does not support statement yet: {:?}",
-                    stmt_kind(stmt)
-                )));
-            }
+            Stmt::MatchStmt { value, arms } => self.gen_match_stmt(value, arms)?,
         }
         Ok(())
     }
 
-    fn gen_let_stmt(&mut self, name: &str, ty: &TypeNode, value: &Expr) -> XResult<()> {
-        if let Expr::ArrayLiteral { elements } = value {
+    /// If `value` is a Some/None/Ok/Err constructor for the Option/Result `ty`,
+    /// render the C compound literal; otherwise return `None`.
+    fn try_constructor(&self, ty: &TypeNode, value: &Spanned<Expr>) -> XResult<Option<String>> {
+        let TypeNode::TypeExpr { name, args } = ty else {
+            return Ok(None);
+        };
+        let alias = self.c_type(ty)?;
+        match (name.as_str(), args.len()) {
+            ("Option", 1) => match &value.node {
+                Expr::CallExpr {
+                    callee,
+                    args: cargs,
+                } if matches!(&callee.node, Expr::Identifier { name: n } if n == "Some")
+                    && cargs.len() == 1 =>
+                {
+                    let v = self.gen_expr(&cargs[0])?;
+                    Ok(Some(format!("({alias}){{ .some = true, .value = {v} }}")))
+                }
+                Expr::Identifier { name: n } if n == "None" => {
+                    Ok(Some(format!("({alias}){{ .some = false }}")))
+                }
+                _ => Ok(None),
+            },
+            ("Result", 2) => match &value.node {
+                Expr::CallExpr {
+                    callee,
+                    args: cargs,
+                } if matches!(&callee.node, Expr::Identifier { name: n } if n == "Ok")
+                    && cargs.len() == 1 =>
+                {
+                    let v = self.gen_expr(&cargs[0])?;
+                    Ok(Some(format!("({alias}){{ .ok = true, .value = {v} }}")))
+                }
+                Expr::CallExpr {
+                    callee,
+                    args: cargs,
+                } if matches!(&callee.node, Expr::Identifier { name: n } if n == "Err")
+                    && cargs.len() == 1 =>
+                {
+                    let v = self.gen_expr(&cargs[0])?;
+                    Ok(Some(format!("({alias}){{ .ok = false, .error = {v} }}")))
+                }
+                _ => Ok(None),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    fn gen_let_stmt(&mut self, name: &str, ty: &TypeNode, value: &Spanned<Expr>) -> XResult<()> {
+        if let Expr::ArrayLiteral { elements } = &value.node {
             self.gen_array_let_stmt(name, ty, elements)?;
+        } else if let Some(rendered) = self.try_constructor(ty, value)? {
+            self.emit(&format!("{} {} = {};", self.c_type(ty)?, name, rendered));
         } else {
             self.emit(&format!(
                 "{} {} = {};",
@@ -401,7 +523,12 @@ impl CGen {
         Ok(())
     }
 
-    fn gen_array_let_stmt(&mut self, name: &str, ty: &TypeNode, elements: &[Expr]) -> XResult<()> {
+    fn gen_array_let_stmt(
+        &mut self,
+        name: &str,
+        ty: &TypeNode,
+        elements: &[Spanned<Expr>],
+    ) -> XResult<()> {
         let TypeNode::TypeExpr {
             name: ty_name,
             args,
@@ -443,10 +570,15 @@ impl CGen {
         Ok(())
     }
 
-    fn gen_for_stmt(&mut self, iterator: &str, iterable: &Expr, body: &Block) -> XResult<()> {
+    fn gen_for_stmt(
+        &mut self,
+        iterator: &str,
+        iterable: &Spanned<Expr>,
+        body: &Block,
+    ) -> XResult<()> {
         let Expr::Identifier {
             name: iterable_name,
-        } = iterable
+        } = &iterable.node
         else {
             return Err(XError::Codegen(
                 "C backend only supports `for value in values` where values is an identifier"
@@ -487,8 +619,97 @@ impl CGen {
         Ok(())
     }
 
-    fn gen_expr(&self, expr: &Expr) -> XResult<String> {
-        match expr {
+    /// Lower `match scrut { Some/Ok(v) => .., None/Err(..) => .. }` to a C
+    /// `if/else` on the discriminant. v1: `scrut` must be a variable of type
+    /// `Option<T>` or `Result<T, E>`.
+    fn gen_match_stmt(&mut self, value: &Spanned<Expr>, arms: &[MatchArm]) -> XResult<()> {
+        let Expr::Identifier { name: scrut_name } = &value.node else {
+            return Err(XError::Codegen(
+                "match currently supports only a variable (identifier) scrutinee".to_string(),
+            ));
+        };
+        let Some(TypeNode::TypeExpr {
+            name: ty_name,
+            args,
+        }) = self.lookup_var(scrut_name).cloned()
+        else {
+            return Err(XError::Codegen(format!(
+                "match scrutinee {scrut_name:?} is not a typed variable"
+            )));
+        };
+        let is_option = match (ty_name.as_str(), args.len()) {
+            ("Option", 1) => true,
+            ("Result", 2) => false,
+            _ => {
+                return Err(XError::Codegen(format!(
+                    "match supports Option<T> / Result<T, E>, got {ty_name}"
+                )));
+            }
+        };
+        let discriminant = if is_option { "some" } else { "ok" };
+        let payload_ty = args[0].clone();
+        let err_ty = if is_option {
+            None
+        } else {
+            Some(args[1].clone())
+        };
+
+        let mut positive: Option<&MatchArm> = None;
+        let mut negative: Option<&MatchArm> = None;
+        for arm in arms {
+            let Pattern::VariantPattern { name, .. } = &arm.pattern;
+            match name.as_str() {
+                "Some" | "Ok" => positive = Some(arm),
+                "None" | "Err" => negative = Some(arm),
+                other => {
+                    return Err(XError::Codegen(format!(
+                        "C backend does not support match variant {other:?}"
+                    )));
+                }
+            }
+        }
+
+        let scrut_c = self.gen_expr(value)?;
+        self.emit(&format!("if ({scrut_c}.{discriminant}) {{"));
+        self.indent += 1;
+        self.push_scope();
+        if let Some(arm) = positive {
+            let Pattern::VariantPattern { bindings, .. } = &arm.pattern;
+            if let Some(binding) = bindings.first() {
+                let payload_c = self.c_type(&payload_ty)?;
+                self.declare_var(binding, payload_ty.clone());
+                self.emit(&format!("{payload_c} {binding} = {scrut_c}.value;"));
+            }
+            for inner in &arm.body.statements {
+                self.gen_stmt(inner)?;
+            }
+        }
+        self.pop_scope();
+        self.indent -= 1;
+        if let Some(arm) = negative {
+            self.emit("} else {");
+            self.indent += 1;
+            self.push_scope();
+            if let Some(err_ty) = &err_ty {
+                let Pattern::VariantPattern { bindings, .. } = &arm.pattern;
+                if let Some(binding) = bindings.first() {
+                    let err_c = self.c_type(err_ty)?;
+                    self.declare_var(binding, err_ty.clone());
+                    self.emit(&format!("{err_c} {binding} = {scrut_c}.error;"));
+                }
+            }
+            for inner in &arm.body.statements {
+                self.gen_stmt(inner)?;
+            }
+            self.pop_scope();
+            self.indent -= 1;
+        }
+        self.emit("}");
+        Ok(())
+    }
+
+    fn gen_expr(&self, expr: &Spanned<Expr>) -> XResult<String> {
+        match &expr.node {
             Expr::IntLiteral { value } | Expr::FloatLiteral { value } => Ok(value.clone()),
             Expr::StringLiteral { value } => Ok(serde_json::to_string(value)?),
             Expr::BoolLiteral { value } => Ok(if *value { "true" } else { "false" }.to_string()),
@@ -519,20 +740,13 @@ impl CGen {
             Expr::FieldAccessExpr { object, field } => {
                 Ok(format!("{}.{}", self.gen_expr(object)?, field))
             }
+            Expr::StructLiteral { name, fields } => {
+                let mut parts = Vec::new();
+                for f in fields {
+                    parts.push(format!(".{} = {}", f.name, self.gen_expr(&f.value)?));
+                }
+                Ok(format!("({name}){{ {} }}", parts.join(", ")))
+            }
         }
-    }
-}
-
-fn stmt_kind(stmt: &Stmt) -> &'static str {
-    match stmt {
-        Stmt::LetStmt { .. } => "LetStmt",
-        Stmt::IfStmt { .. } => "IfStmt",
-        Stmt::ForStmt { .. } => "ForStmt",
-        Stmt::WhileStmt { .. } => "WhileStmt",
-        Stmt::MatchStmt { .. } => "MatchStmt",
-        Stmt::ReturnStmt { .. } => "ReturnStmt",
-        Stmt::BreakStmt => "BreakStmt",
-        Stmt::ContinueStmt => "ContinueStmt",
-        Stmt::ExprStmt { .. } => "ExprStmt",
     }
 }

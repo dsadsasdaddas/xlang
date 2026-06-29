@@ -8,9 +8,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::ast::Program;
 use crate::codegen::c::CGen;
-use crate::error::{XError, XResult};
+use crate::error::{Diagnostics, ErrorCode, Severity, XError, XResult};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use crate::source::LineIndex;
 use crate::typecheck::check_program;
 
 const DEFAULT_RUN_SAFE_TIMEOUT_MS: u64 = 2_000;
@@ -54,12 +55,127 @@ struct CapturedOutput {
     truncated: bool,
 }
 
-pub fn parse_file(path: &Path) -> XResult<Program> {
+/// Parse `path` collecting ALL diagnostics (lexer + parser + type checker)
+/// rather than bailing at the first. Returns `(program, source, diagnostics)`:
+/// `program` is `None` if parsing failed outright; `source` is the file content
+/// (for line/col conversion); `diagnostics` may be non-empty even when a program
+/// was produced. Only fatal I/O errors propagate via `XResult`.
+pub fn parse_collecting(path: &Path) -> XResult<(Option<Program>, String, Diagnostics)> {
     let source = fs::read_to_string(path)?;
-    let tokens = Lexer::new(&source).tokenize()?;
-    let program = Parser::new(tokens, path.display().to_string()).parse()?;
-    check_program(&program)?;
-    Ok(program)
+    let mut diags = Diagnostics::new();
+
+    let (tokens, lex_diags) = Lexer::new(&source).tokenize();
+    diags.extend(lex_diags);
+
+    let program = match Parser::new(tokens, path.display().to_string()).parse() {
+        Ok(program) => Some(program),
+        Err(diag) => {
+            diags.push(diag);
+            None
+        }
+    };
+
+    if let Some(program) = &program {
+        diags.extend(check_program(program));
+    }
+
+    Ok((program, source, diags))
+}
+
+/// Legacy single-program entry point for codegen paths: returns the program
+/// only when it parsed and type-checked cleanly.
+pub fn parse_file(path: &Path) -> XResult<Program> {
+    let (program, _source, diags) = parse_collecting(path)?;
+    match program {
+        Some(program) if !diags.has_errors() => Ok(program),
+        _ => Err(XError::Parse(
+            diags
+                .items
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("; "),
+        )),
+    }
+}
+
+/// Machine-readable diagnostic for JSON output. Mirrors an LSP `Diagnostic`
+/// (severity + code + message + range); the range carries both 1-based
+/// line/col (resolved from bytes) and the raw byte span.
+#[derive(Debug, Serialize)]
+pub struct SerializableDiagnostic {
+    pub severity: Severity,
+    pub code: ErrorCode,
+    pub message: String,
+    pub file: String,
+    pub range: SerializableRange,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerializableRange {
+    pub line: usize,
+    pub col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Convert accumulated diagnostics to serializable form, resolving byte spans
+/// to 1-based line/col via `LineIndex`.
+pub fn diagnostics_to_serializable(
+    diags: &Diagnostics,
+    source: &str,
+    file: &str,
+) -> Vec<SerializableDiagnostic> {
+    let index = LineIndex::new(source);
+    diags
+        .items
+        .iter()
+        .map(|d| {
+            let (line, col) = index.line_col(d.span.start);
+            let end_offset = d.span.end.saturating_sub(1).max(d.span.start);
+            let (end_line, end_col) = index.line_col(end_offset);
+            SerializableDiagnostic {
+                severity: d.severity,
+                code: d.code,
+                message: d.message.clone(),
+                file: file.to_string(),
+                range: SerializableRange {
+                    line,
+                    col,
+                    end_line,
+                    end_col,
+                    start: d.span.start,
+                    end: d.span.end,
+                },
+            }
+        })
+        .collect()
+}
+
+/// gcc-style lines: `file:line:col: severity[code]: message`.
+pub fn diagnostics_to_gcc(diags: &Diagnostics, source: &str, file: &str) -> Vec<String> {
+    let index = LineIndex::new(source);
+    diags
+        .items
+        .iter()
+        .map(|d| {
+            let (line, col) = index.line_col(d.span.start);
+            let sev = match d.severity {
+                Severity::Error => "error",
+                Severity::Warning => "warning",
+                Severity::Information => "note",
+                Severity::Hint => "hint",
+            };
+            let code = serde_json::to_string(&d.code)
+                .unwrap_or_else(|_| "\"E9002\"".into())
+                .trim_matches('"')
+                .to_string();
+            format!("{file}:{line}:{col}: {sev}[{code}]: {}", d.message)
+        })
+        .collect()
 }
 
 pub fn write_c(source: &Path, output: Option<PathBuf>) -> XResult<PathBuf> {
@@ -233,7 +349,7 @@ impl RunSafeResult {
 
 fn result_from_xerror(err: XError, started: Instant, options: &RunSafeOptions) -> RunSafeResult {
     let status = match &err {
-        XError::Lex(_) | XError::Parse(_) | XError::Type(_) => "check_error",
+        XError::Parse(_) => "check_error",
         XError::Codegen(_) => "codegen_error",
         XError::Io(_) | XError::Json(_) => "error",
     };
