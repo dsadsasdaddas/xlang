@@ -33,6 +33,7 @@ impl CGen {
         self.emit("#include <stdio.h>");
         self.emit("#include <string.h>");
         self.emit("#include <stdlib.h>");
+        self.emit("#include <time.h>");
         self.emit("");
         self.emit_runtime_preamble();
         self.emit_networking_preamble();
@@ -899,6 +900,13 @@ impl CGen {
             "    if (n > 0 && buf[n - 1] == '\\n') buf[n - 1] = 0;",
             "    return buf;",
             "}",
+            "char* __xlang_time_str() {",
+            "    time_t t = time(NULL);",
+            "    struct tm* tm = localtime(&t);",
+            "    char* s = (char*)malloc(64);",
+            "    strftime(s, 64, \"%a %b %e %H:%M:%S %Z %Y\", tm);",
+            "    return s;",
+            "}",
             "",
         ];
         for line in lines {
@@ -1053,6 +1061,7 @@ impl CGen {
             "str_to_int" => format!("(int32_t)strtol({a}, 0, 10)"),
             "remove_file" => format!("remove({a})"),
             "system" => format!("system({a})"),
+            "sleep_sec" => format!("(unsigned)sleep(({a}))"),
             "rename_file" => {
                 let Some(second) = args.get(1) else {
                     return Ok(None);
@@ -1133,6 +1142,7 @@ impl CGen {
             "argc" => "(__xlang_argc_g)".to_string(),
             "read_stdin" => "__xlang_read_stdin()".to_string(),
             "read_line" => "__xlang_read_line()".to_string(),
+            "time_str" => "__xlang_time_str()".to_string(),
             _ => return Ok(None),
         }))
     }
