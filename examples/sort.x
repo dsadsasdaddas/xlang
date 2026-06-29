@@ -1,15 +1,21 @@
 module main
 
-// sort [file] — sort lines (like GNU sort). Uses quicksort (O(n log n)) for
-// competitive performance; the Vec is sorted in place via index assignment
-// (the data pointer is shared across the value-copy).
-fn quicksort(lines: Vec<String>, lo: i32, hi: i32): i32 {
+// sort [-r] [file] — sort lines lexicographically (or reverse with -r, like
+// GNU sort / sort -r). Uses quicksort O(n log n). stdin if no file.
+fn quicksort(lines: Vec<String>, lo: i32, hi: i32, reverse: bool): i32 {
     if lo < hi {
         let pivot: String = lines[hi]
         let mut i: i32 = lo - 1
         let mut j: i32 = lo
         while j < hi {
-            if str_cmp(lines[j], pivot) <= 0 {
+            let cmp: i32 = str_cmp(lines[j], pivot)
+            let mut should_swap: bool = false
+            if reverse {
+                should_swap = cmp > 0
+            } else {
+                should_swap = cmp <= 0
+            }
+            if should_swap {
                 i += 1
                 let tmp: String = lines[i]
                 lines[i] = lines[j]
@@ -21,16 +27,26 @@ fn quicksort(lines: Vec<String>, lo: i32, hi: i32): i32 {
         let tmp2: String = lines[i]
         lines[i] = lines[hi]
         lines[hi] = tmp2
-        quicksort(lines, lo, i - 1)
-        quicksort(lines, i + 1, hi)
+        quicksort(lines, lo, i - 1, reverse)
+        quicksort(lines, i + 1, hi, reverse)
     }
     return 0
 }
 
 fn main(): i32 {
+    let mut reverse: bool = false
     let mut s: String = ""
     if argc() >= 2 {
-        s = read_file(argv(1))
+        if str_eq(argv(1), "-r") {
+            reverse = true
+            if argc() >= 3 {
+                s = read_file(argv(2))
+            } else {
+                s = read_stdin()
+            }
+        } else {
+            s = read_file(argv(1))
+        }
     } else {
         s = read_stdin()
     }
@@ -50,7 +66,7 @@ fn main(): i32 {
     }
     let count: i32 = vec_len(lines)
     if count > 0 {
-        quicksort(lines, 0, count - 1)
+        quicksort(lines, 0, count - 1, reverse)
     }
     let mut k: i32 = 0
     while k < count {
