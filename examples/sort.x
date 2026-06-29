@@ -1,7 +1,31 @@
 module main
 
-// sort <file> — sort lines lexicographically (like GNU sort). Bubble sort on a
-// Vec<String> using str_cmp for ordering + vec_len for the count.
+// sort [file] — sort lines (like GNU sort). Uses quicksort (O(n log n)) for
+// competitive performance; the Vec is sorted in place via index assignment
+// (the data pointer is shared across the value-copy).
+fn quicksort(lines: Vec<String>, lo: i32, hi: i32) {
+    if lo < hi {
+        let pivot: String = lines[hi]
+        let mut i: i32 = lo - 1
+        let mut j: i32 = lo
+        while j < hi {
+            if str_cmp(lines[j], pivot) <= 0 {
+                i += 1
+                let tmp: String = lines[i]
+                lines[i] = lines[j]
+                lines[j] = tmp
+            }
+            j += 1
+        }
+        i += 1
+        let tmp2: String = lines[i]
+        lines[i] = lines[hi]
+        lines[hi] = tmp2
+        quicksort(lines, lo, i - 1)
+        quicksort(lines, i + 1, hi)
+    }
+}
+
 fn main(): i32 {
     let mut s: String = ""
     if argc() >= 2 {
@@ -24,18 +48,8 @@ fn main(): i32 {
         lines.push(str_slice(s, start, n))
     }
     let count: i32 = vec_len(lines)
-    let mut a: i32 = 0
-    while a < count {
-        let mut b: i32 = 0
-        while b < count - 1 - a {
-            if str_cmp(lines[b], lines[b + 1]) > 0 {
-                let tmp: String = lines[b]
-                lines[b] = lines[b + 1]
-                lines[b + 1] = tmp
-            }
-            b += 1
-        }
-        a += 1
+    if count > 0 {
+        quicksort(lines, 0, count - 1)
     }
     let mut k: i32 = 0
     while k < count {
