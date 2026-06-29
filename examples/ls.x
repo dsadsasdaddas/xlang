@@ -11,8 +11,11 @@ fn main(): i32 {
     let n: i32 = dir_count(path)
     let mut i: i32 = 0
     while i < n {
-        print_raw(dir_entry(path, i))
-        print_raw("\n")
+        let e: String = dir_entry(path, i)
+        if str_char_at(e, 0) != 46 {
+            print_raw(e)
+            print_raw("\n")
+        }
         i += 1
     }
     return 0
