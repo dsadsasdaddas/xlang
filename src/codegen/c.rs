@@ -224,6 +224,29 @@ impl CGen {
                 )
             });
         }
+        if name == "Vec" {
+            if args.len() != 1 {
+                return Err(XError::Codegen(format!(
+                    "Vec expects exactly one type argument, got {}",
+                    args.len()
+                )));
+            }
+            let elem_ty = &args[0];
+            let alias = self.c_type(ty)?;
+            let elem_c = self.c_type(elem_ty)?;
+            let elem_suffix = self.c_type_suffix(elem_ty)?;
+            typedefs.entry(alias.clone()).or_insert_with(|| {
+                format!(
+                    "typedef struct {{\n    {elem_c} *data;\n    size_t len;\n    size_t cap;\n}} {alias};"
+                )
+            });
+            let push_name = format!("__xlang_vec_push_{elem_suffix}");
+            typedefs.entry(push_name.clone()).or_insert_with(|| {
+                format!(
+                    "void {push_name}({alias} *v, {elem_c} x) {{\n    if (v->len == v->cap) {{\n        v->cap = v->cap ? v->cap * 2 : 4;\n        v->data = ({elem_c} *)realloc(v->data, v->cap * sizeof({elem_c}));\n    }}\n    v->data[v->len++] = x;\n}}"
+                )
+            });
+        }
         Ok(())
     }
 
@@ -258,6 +281,9 @@ impl CGen {
                     self.c_type_suffix(&args[0])?,
                     self.c_type_suffix(&args[1])?
                 ))
+            }
+            TypeNode::TypeExpr { name, args } if name == "Vec" && args.len() == 1 => {
+                Ok(format!("Vec_{}", self.c_type_suffix(&args[0])?))
             }
             TypeNode::TypeExpr { name, .. } => Err(XError::Codegen(format!(
                 "C backend does not support generic type yet: {name}<...>"
@@ -294,6 +320,9 @@ impl CGen {
                     self.c_type_suffix(&args[0])?,
                     self.c_type_suffix(&args[1])?
                 ))
+            }
+            TypeNode::TypeExpr { name, args } if name == "Vec" && args.len() == 1 => {
+                Ok(format!("Vec_{}", self.c_type_suffix(&args[0])?))
             }
             TypeNode::TypeExpr { name, .. } => Err(XError::Codegen(format!(
                 "C backend does not support {name}<...> as a generated type suffix yet"
@@ -506,6 +535,19 @@ impl CGen {
                 }
                 _ => Ok(None),
             },
+            ("Vec", 1) => match &value.node {
+                Expr::CallExpr {
+                    callee,
+                    args: cargs,
+                } if matches!(&callee.node, Expr::Identifier { name: n } if n == "vec_new")
+                    && cargs.is_empty() =>
+                {
+                    Ok(Some(format!(
+                        "({alias}){{ .data = 0, .len = 0, .cap = 0 }}"
+                    )))
+                }
+                _ => Ok(None),
+            },
             _ => Ok(None),
         }
     }
@@ -608,6 +650,11 @@ impl CGen {
                 let n = self.const_type_arg_value(&args[1], "Array length")?;
                 (args[0].clone(), n.to_string(), format!("{iter_c}.data"))
             }
+            ("Vec", 1) => (
+                args[0].clone(),
+                format!("{iter_c}.len"),
+                format!("{iter_c}.data"),
+            ),
             _ => {
                 return Err(XError::Codegen(format!(
                     "C backend only supports for-in over Slice<T> or Array<T, N>, got {name}<...>"
@@ -779,6 +826,36 @@ impl CGen {
         Ok(Some(rendered))
     }
 
+    /// Lower `v.push(x)` on a `Vec<T>` variable to a call of the per-element
+    /// runtime helper `__xlang_vec_push_T(&v, x)` (emitted in the typedef pass).
+    fn try_vec_push_call(
+        &self,
+        callee: &Spanned<Expr>,
+        args: &[Spanned<Expr>],
+    ) -> XResult<Option<String>> {
+        let Expr::FieldAccessExpr { object, field } = &callee.node else {
+            return Ok(None);
+        };
+        if field != "push" || args.len() != 1 {
+            return Ok(None);
+        }
+        let Expr::Identifier { name: vname } = &object.node else {
+            return Ok(None);
+        };
+        let Some(TypeNode::TypeExpr { name, args: targs }) = self.lookup_var(vname) else {
+            return Ok(None);
+        };
+        if name != "Vec" || targs.len() != 1 {
+            return Ok(None);
+        }
+        let elem_suffix = self.c_type_suffix(&targs[0])?;
+        let v_c = self.gen_expr(object)?;
+        let x_c = self.gen_expr(&args[0])?;
+        Ok(Some(format!(
+            "__xlang_vec_push_{elem_suffix}(&{v_c}, {x_c})"
+        )))
+    }
+
     fn try_print_call(
         &self,
         callee: &Spanned<Expr>,
@@ -832,6 +909,9 @@ impl CGen {
                     return Ok(rendered);
                 }
                 if let Some(rendered) = self.try_string_call(callee, args)? {
+                    return Ok(rendered);
+                }
+                if let Some(rendered) = self.try_vec_push_call(callee, args)? {
                     return Ok(rendered);
                 }
                 let mut parts = Vec::new();

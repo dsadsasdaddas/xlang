@@ -198,6 +198,9 @@ impl Checker {
                     CheckedType::Named { name, args } if name == "Array" && args.len() == 2 => {
                         args[0].clone()
                     }
+                    CheckedType::Named { name, args } if name == "Vec" && args.len() == 1 => {
+                        args[0].clone()
+                    }
                     CheckedType::Unknown => CheckedType::Unknown,
                     other => {
                         self.emit(
@@ -324,6 +327,9 @@ impl Checker {
                         args[0].clone()
                     }
                     CheckedType::Named { name, args } if name == "Slice" && args.len() == 1 => {
+                        args[0].clone()
+                    }
+                    CheckedType::Named { name, args } if name == "Vec" && args.len() == 1 => {
                         args[0].clone()
                     }
                     CheckedType::Unknown => CheckedType::Unknown,
