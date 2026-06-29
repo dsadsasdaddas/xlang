@@ -11,10 +11,9 @@ fn du_dir(dir: String): i32 {
         if !str_eq(entry, ".") {
             if !str_eq(entry, "..") {
                 let path: String = str_concat(str_concat(dir, "/"), entry)
+                total += file_size(path)
                 if is_dir(path) {
                     total += du_dir(path)
-                } else {
-                    total += file_size(path)
                 }
             }
         }
