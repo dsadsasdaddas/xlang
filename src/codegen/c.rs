@@ -1063,6 +1063,7 @@ impl CGen {
             "dir_count" => format!("__xlang_dir_count({a})"),
             "is_dir" => format!("__xlang_is_dir({a})"),
             "file_size" => format!("__xlang_file_size({a})"),
+            "make_dir" => format!("mkdir({a}, 0755)"),
             "dir_entry" => {
                 let Some(second) = args.get(1) else {
                     return Ok(None);
