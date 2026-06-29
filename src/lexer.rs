@@ -239,7 +239,9 @@ impl Lexer {
     }
 
     fn match_multi_symbol(&mut self) -> Option<String> {
-        for sym in ["=>", "==", "!=", ">=", "<=", "&&", "||"] {
+        for sym in [
+            "=>", "==", "!=", ">=", "<=", "&&", "||", "+=", "-=", "*=", "/=", "%=",
+        ] {
             let sym_chars: Vec<char> = sym.chars().collect();
             if self.chars.get(self.i..self.i + sym_chars.len()) == Some(sym_chars.as_slice()) {
                 for _ in 0..sym_chars.len() {

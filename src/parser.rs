@@ -426,6 +426,24 @@ impl Parser {
                 span,
             ));
         }
+        // Compound assignment (`x += y`, etc.) desugars to `x = x <op> y`. The
+        // target is a variable/field access (no side effects in xlang), so the
+        // double evaluation is safe and needs no AST/typecheck/codegen changes.
+        for op in ["+=", "-=", "*=", "/=", "%="] {
+            if self.match_text(op) {
+                let rhs = self.parse_assignment()?;
+                let arith = &op[..op.len() - 1]; // strip the trailing '='
+                let combined = binary(arith, expr.clone(), rhs);
+                let span = expr.span.merge(combined.span);
+                return Ok(Spanned::new(
+                    Expr::AssignmentExpr {
+                        target: Box::new(expr),
+                        value: Box::new(combined),
+                    },
+                    span,
+                ));
+            }
+        }
         Ok(expr)
     }
 

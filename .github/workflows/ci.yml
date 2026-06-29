@@ -47,3 +47,6 @@ jobs:
 
       - name: Run result demo (construct + match)
         run: make run-result-demo
+
+      - name: Run compound assignment demo
+        run: make run-compound
