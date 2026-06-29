@@ -1,4 +1,4 @@
-.PHONY: check ast-if c-loop c-array-type run-array-literal run-if run-option-demo run-result-demo run-compound run-struct-demo run-print-demo run-array-sum run-array-double run-string-build clean
+.PHONY: check ast-if c-loop c-array-type run-array-literal run-if run-option-demo run-result-demo run-compound run-struct-demo run-print-demo run-array-sum run-array-double run-string-build run-grades clean
 
 check:
 	cargo run --quiet --bin xlangc -- check examples/*.x
@@ -43,6 +43,9 @@ run-array-double:
 
 run-string-build:
 	cargo run --quiet --bin xlangc -- run examples/string_build.x
+
+run-grades:
+	cargo run --quiet --bin xlangc -- run examples/grades.x
 
 clean:
 	rm -rf build target

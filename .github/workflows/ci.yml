@@ -65,3 +65,6 @@ jobs:
 
       - name: Run string-build demo (concat / len / int_to_str)
         run: make run-string-build
+
+      - name: Run grades showcase (struct records + array processing)
+        run: make run-grades
