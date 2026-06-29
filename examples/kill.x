@@ -8,7 +8,7 @@ fn main(): i32 {
         return 1
     }
     let pid: i32 = str_to_int(argv(1))
-    let sig: i32 = 15
+    let mut sig: i32 = 15
     if argc() >= 3 {
         sig = str_to_int(argv(2))
     }
