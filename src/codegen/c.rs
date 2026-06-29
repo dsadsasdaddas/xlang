@@ -1016,6 +1016,7 @@ impl CGen {
                 format!("(int32_t)strcmp({a}, {b})")
             }
             "vec_len" => format!("((int32_t)({a}).len)"),
+            "str_to_int" => format!("(int32_t)strtol({a}, 0, 10)"),
             "read_file" => format!("__xlang_read_file({a})"),
             "write_file" => {
                 let Some(second) = args.get(1) else {
