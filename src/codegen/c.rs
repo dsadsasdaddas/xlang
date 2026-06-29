@@ -1072,6 +1072,7 @@ impl CGen {
                 let b = self.gen_expr(second)?;
                 format!("kill(({a}), ({b}))")
             }
+            "random_int" => format!("(int32_t)(rand() % ({a}))"),
             "str_to_int_oct" => format!("(int32_t)strtol({a}, 0, 8)"),
             "chmod" => {
                 let Some(second) = args.get(1) else {
@@ -1187,6 +1188,7 @@ impl CGen {
             "read_stdin" => "__xlang_read_stdin()".to_string(),
             "read_line" => "__xlang_read_line()".to_string(),
             "time_str" => "__xlang_time_str()".to_string(),
+            "random_seed" => "srand((unsigned)time(NULL))".to_string(),
             _ => return Ok(None),
         }))
     }
