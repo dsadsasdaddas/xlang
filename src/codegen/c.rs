@@ -1008,6 +1008,21 @@ impl CGen {
             "    char* resolved = realpath(path, NULL);",
             "    return resolved ? resolved : \"\";",
             "}",
+            "extern char** environ;",
+            "int32_t __xlang_env_count() {",
+            "    int32_t n = 0;",
+            "    while (environ[n]) n++;",
+            "    return n;",
+            "}",
+            "const char* __xlang_env_entry(int32_t idx) {",
+            "    extern char** environ;",
+            "    int32_t n = 0;",
+            "    while (environ[n]) {",
+            "        if (n == idx) return environ[n];",
+            "        n++;",
+            "    }",
+            "    return \"\";",
+            "}",
             "#endif",
             "",
         ];
@@ -1097,6 +1112,7 @@ impl CGen {
             "getenv" => format!("(getenv({a}) ? getenv({a}) : \"\")"),
             "readlink" => format!("__xlang_readlink({a})"),
             "realpath" => format!("__xlang_realpath({a})"),
+            "env_entry" => format!("__xlang_env_entry({a})"),
             "str_to_int_oct" => format!("(int32_t)strtol({a}, 0, 8)"),
             "chmod" => {
                 let Some(second) = args.get(1) else {
@@ -1214,6 +1230,7 @@ impl CGen {
             "time_str" => "__xlang_time_str()".to_string(),
             "random_seed" => "srand((unsigned)time(NULL))".to_string(),
             "getcwd" => "__xlang_getcwd()".to_string(),
+            "env_count" => "__xlang_env_count()".to_string(),
             _ => return Ok(None),
         }))
     }
