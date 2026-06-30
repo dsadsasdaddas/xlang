@@ -91,6 +91,129 @@ fn run_child(cmd: String): i32 {
     return 0
 }
 
+// Arithmetic for $((expr)): recursive descent (+,-,*,/,parens,unary-,numbers,
+// and bare/$-prefixed variable names → getenv). The position cursor is a
+// Vec<i32> of length 1, mutated via index assignment — shared across the
+// recursive calls (Vec data lives on the heap), so callees advance it.
+fn arith_skip(e: String, pos: Vec<i32>): i32 {
+    let n: i32 = str_len(e)
+    while pos[0] < n {
+        if str_char_at(e, pos[0]) == 32 {
+            pos[0] = pos[0] + 1
+        } else {
+            break
+        }
+    }
+    return 0
+}
+
+fn arith_factor(e: String, pos: Vec<i32>): i32 {
+    let n: i32 = str_len(e)
+    arith_skip(e, pos)
+    if pos[0] >= n {
+        return 0
+    }
+    let c: i32 = str_char_at(e, pos[0])
+    if c == 45 {
+        pos[0] = pos[0] + 1
+        return 0 - arith_factor(e, pos)
+    }
+    if c == 40 {
+        pos[0] = pos[0] + 1
+        let v: i32 = arith_expr(e, pos)
+        arith_skip(e, pos)
+        if pos[0] < n {
+            if str_char_at(e, pos[0]) == 41 {
+                pos[0] = pos[0] + 1
+            }
+        }
+        return v
+    }
+    if c == 36 {
+        pos[0] = pos[0] + 1
+    }
+    if is_name_start(str_char_at(e, pos[0])) {
+        let name_start: i32 = pos[0]
+        while pos[0] < n {
+            if is_name_char(str_char_at(e, pos[0])) {
+                pos[0] = pos[0] + 1
+            } else {
+                break
+            }
+        }
+        return str_to_int(getenv(str_slice(e, name_start, pos[0])))
+    }
+    let mut v: i32 = 0
+    while pos[0] < n {
+        let d: i32 = str_char_at(e, pos[0])
+        if d >= 48 {
+            if d <= 57 {
+                v = v * 10 + (d - 48)
+                pos[0] = pos[0] + 1
+            } else {
+                break
+            }
+        } else {
+            break
+        }
+    }
+    return v
+}
+
+fn arith_term(e: String, pos: Vec<i32>): i32 {
+    let n: i32 = str_len(e)
+    let mut v: i32 = arith_factor(e, pos)
+    while true {
+        arith_skip(e, pos)
+        if pos[0] >= n {
+            break
+        }
+        let c: i32 = str_char_at(e, pos[0])
+        if c == 42 {
+            pos[0] = pos[0] + 1
+            v = v * arith_factor(e, pos)
+        } else {
+            if c == 47 {
+                pos[0] = pos[0] + 1
+                v = v / arith_factor(e, pos)
+            } else {
+                break
+            }
+        }
+    }
+    return v
+}
+
+fn arith_expr(e: String, pos: Vec<i32>): i32 {
+    let n: i32 = str_len(e)
+    let mut v: i32 = arith_term(e, pos)
+    while true {
+        arith_skip(e, pos)
+        if pos[0] >= n {
+            break
+        }
+        let c: i32 = str_char_at(e, pos[0])
+        if c == 43 {
+            pos[0] = pos[0] + 1
+            v = v + arith_term(e, pos)
+        } else {
+            if c == 45 {
+                pos[0] = pos[0] + 1
+                v = v - arith_term(e, pos)
+            } else {
+                break
+            }
+        }
+    }
+    return v
+}
+
+fn eval_arith(e: String): i32 {
+    let pos: Vec<i32> = vec_new()
+    pos.push(0)
+    return arith_expr(e, pos)
+}
+
 // Combined expansion in ONE pass (one sb): $(cmd) command substitution AND
 // $VAR. Doing both in one scan avoids the two-sb-pass conflict (each pass
 // resets the global sb buffer).
@@ -101,6 +224,35 @@ fn expand(s: String): String {
     while i < n {
         let c: i32 = str_char_at(s, i)
         if c == 36 {
+            // $((expr)) arithmetic substitution (checked before $(cmd))
+            if i + 2 < n {
+                if str_char_at(s, i + 1) == 40 {
+                    if str_char_at(s, i + 2) == 40 {
+                        let mut adep: i32 = 0
+                        let mut j: i32 = i + 3
+                        while j < n {
+                            let cc: i32 = str_char_at(s, j)
+                            if cc == 40 {
+                                adep = adep + 1
+                            }
+                            if cc == 41 {
+                                if adep == 0 {
+                                    break
+                                }
+                                adep = adep - 1
+                            }
+                            j = j + 1
+                        }
+                        if j < n {
+                            if str_char_at(s, j) == 41 {
+                                sb_push(int_to_str(eval_arith(str_slice(s, i + 3, j))))
+                                i = j + 2
+                                continue
+                            }
+                        }
+                    }
+                }
+            }
             if i + 1 < n {
                 if str_char_at(s, i + 1) == 40 {
                     let mut depth: i32 = 1
@@ -366,7 +518,7 @@ fn run_for(c: String): i32 {
         let w: String = trim(words[i])
         if str_len(w) > 0 {
             setenv(var, w)
-            run_command(body)
+            run_body(body)
         }
         i = i + 1
     }
@@ -387,7 +539,7 @@ fn run_if(c: String): i32 {
     }
     let body: String = strip_trailing_semi(str_slice(body_full, 0, fi_pos))
     if run_command(cond) == 0 {
-        run_command(body)
+        run_body(body)
     }
     return 0
 }
@@ -409,7 +561,19 @@ fn run_while(c: String): i32 {
         if run_command(cond) != 0 {
             break
         }
-        run_command(body)
+        run_body(body)
+    }
+    return 0
+}
+
+// Run a control-flow BODY, which may contain ';'-separated commands. (Nested
+// control flow inside a body isn't supported — the ';' split would break it.)
+fn run_body(body: String): i32 {
+    let parts: Vec<String> = split_char(body, 59)
+    let mut k: i32 = 0
+    while k < vec_len(parts) {
+        run_command(parts[k])
+        k = k + 1
     }
     return 0
 }
