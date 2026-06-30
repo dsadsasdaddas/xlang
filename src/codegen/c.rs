@@ -122,9 +122,9 @@ impl CGen {
                 let Some(def) = pending.get(name) else {
                     continue;
                 };
-                let blocked = pending.keys().any(|other| {
-                    other != name && def.contains(other) && !emitted.contains(other)
-                });
+                let blocked = pending
+                    .keys()
+                    .any(|other| other != name && def.contains(other) && !emitted.contains(other));
                 if !blocked {
                     ordered.push(def.clone());
                     emitted.insert(name.clone());
