@@ -712,6 +712,37 @@ fn run_command(cmd: String): i32 {
     if str_len(c) == 0 {
         return 0
     }
+    // Compound commands: split at the FIRST `&&` or `||`, short-circuit.
+    // (left has no operator after the first split, so recursion terminates.)
+    let and_pos: i32 = str_find(c, " && ")
+    let or_pos: i32 = str_find(c, " || ")
+    let mut split_pos: i32 = -1
+    let mut op: String = ""
+    if and_pos >= 0 {
+        split_pos = and_pos
+        op = "&&"
+    }
+    if or_pos >= 0 {
+        if split_pos < 0 || or_pos < split_pos {
+            split_pos = or_pos
+            op = "||"
+        }
+    }
+    if split_pos >= 0 {
+        let left: String = trim(str_slice(c, 0, split_pos))
+        let right: String = trim(str_slice(c, split_pos + 4, str_len(c)))
+        let lc: i32 = run_command(left)
+        if str_eq(op, "&&") {
+            if lc == 0 {
+                return run_command(right)
+            }
+            return lc
+        }
+        if lc != 0 {
+            return run_command(right)
+        }
+        return lc
+    }
     // test / [ ... ] — returns 0 (true) or 1 (false); checked before pipes so
     // `[ a -lt b ]` is a condition, not a redirect.
     if str_char_at(c, 0) == 91 {
