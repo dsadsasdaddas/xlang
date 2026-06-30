@@ -961,6 +961,7 @@ impl CGen {
             "#include <sys/utsname.h>",
             "#include <sys/epoll.h>",
             "#include <fcntl.h>",
+            "#include <sys/sendfile.h>",
             "int32_t __xlang_tcp_listen(int32_t port) {",
             "    int fd = socket(AF_INET, SOCK_STREAM, 0);",
             "    int opt = 1;",
@@ -1022,6 +1023,19 @@ impl CGen {
             "int32_t __xlang_set_nonblock(int32_t fd) {",
             "    int flags = fcntl(fd, F_GETFL, 0);",
             "    return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 ? 0 : -1;",
+            "}",
+            "int32_t __xlang_open_read(const char* path) {",
+            "    return (int32_t)open(path, O_RDONLY);",
+            "}",
+            "int32_t __xlang_sendfile_fd(int32_t out_fd, int32_t in_fd, int32_t len) {",
+            "    off_t off = 0;",
+            "    size_t remaining = (size_t)len;",
+            "    while (remaining > 0) {",
+            "        ssize_t s = sendfile(out_fd, in_fd, &off, remaining);",
+            "        if (s <= 0) break;",
+            "        remaining -= (size_t)s;",
+            "    }",
+            "    return (int32_t)((size_t)len - remaining);",
             "}",
             "int32_t __xlang_dir_count(const char* path) {",
             "    DIR* d = opendir(path);",
@@ -1268,12 +1282,29 @@ impl CGen {
             "epoll_del" => format!("__xlang_epoll_del({a})"),
             "epoll_wait" => format!("__xlang_epoll_wait({a})"),
             "set_nonblock" => format!("__xlang_set_nonblock({a})"),
+            "open_read" => format!("__xlang_open_read({a})"),
+            "sendfile_fd" => {
+                let (Some(second), Some(third)) = (args.get(1), args.get(2)) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                let c = self.gen_expr(third)?;
+                format!("__xlang_sendfile_fd({a}, {b}, {c})")
+            }
             "send_str" => {
                 let Some(second) = args.get(1) else {
                     return Ok(None);
                 };
                 let b = self.gen_expr(second)?;
                 format!("send({a}, {b}, strlen({b}), 0)")
+            }
+            "send_bytes" => {
+                let (Some(second), Some(third)) = (args.get(1), args.get(2)) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                let c = self.gen_expr(third)?;
+                format!("send({a}, {b}, (size_t)({c}), 0)")
             }
             _ => return Ok(None),
         };
