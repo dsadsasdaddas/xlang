@@ -195,12 +195,21 @@ impl Checker {
                     CheckedType::Named { name, args } if name == "Slice" && args.len() == 1 => {
                         args[0].clone()
                     }
+                    CheckedType::Named { name, args } if name == "Array" && args.len() == 2 => {
+                        args[0].clone()
+                    }
+                    CheckedType::Named { name, args } if name == "Vec" && args.len() == 1 => {
+                        args[0].clone()
+                    }
                     CheckedType::Unknown => CheckedType::Unknown,
                     other => {
                         self.emit(
                             iterable.span,
                             ErrorCode::TypeForInExpectsSlice,
-                            format!("for-in expects Slice<T>, got {}", other.display()),
+                            format!(
+                                "for-in expects Slice<T> or Array<T, N>, got {}",
+                                other.display()
+                            ),
                         );
                         CheckedType::Unknown
                     }
@@ -303,6 +312,37 @@ impl Checker {
                 }
                 CheckedType::Unknown
             }
+            Expr::IndexExpr { object, index } => {
+                let obj_ty = self.infer_expr(object);
+                let idx_ty = self.infer_expr(index);
+                if !idx_ty.is_unknown() && !idx_ty.is_int_literal() && !idx_ty.is_integer_scalar() {
+                    self.emit(
+                        span,
+                        ErrorCode::TypeMismatch,
+                        format!("array index must be an integer, got {}", idx_ty.display()),
+                    );
+                }
+                match &obj_ty {
+                    CheckedType::Named { name, args } if name == "Array" && args.len() == 2 => {
+                        args[0].clone()
+                    }
+                    CheckedType::Named { name, args } if name == "Slice" && args.len() == 1 => {
+                        args[0].clone()
+                    }
+                    CheckedType::Named { name, args } if name == "Vec" && args.len() == 1 => {
+                        args[0].clone()
+                    }
+                    CheckedType::Unknown => CheckedType::Unknown,
+                    other => {
+                        self.emit(
+                            span,
+                            ErrorCode::TypeMismatch,
+                            format!("cannot index into {}", other.display()),
+                        );
+                        CheckedType::Unknown
+                    }
+                }
+            }
             Expr::StructLiteral { name, fields } => {
                 // Clone the declared fields so we don't hold a borrow of self
                 // across the mutable infer_expr calls below.
@@ -350,7 +390,9 @@ impl Checker {
         let left_ty = self.infer_expr(left);
         let right_ty = self.infer_expr(right);
         match op {
-            "+" | "-" | "*" | "/" | "%" => self.infer_numeric_result(op, &left_ty, &right_ty, span),
+            "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>" => {
+                self.infer_numeric_result(op, &left_ty, &right_ty, span)
+            }
             ">" | ">=" | "<" | "<=" => {
                 self.expect_numeric_pair(op, &left_ty, &right_ty, span);
                 CheckedType::named("bool")
@@ -391,6 +433,10 @@ impl Checker {
             }
             "-" => {
                 self.expect_numeric(&value_ty, "operand of unary -", value.span);
+                value_ty
+            }
+            "~" => {
+                self.expect_numeric(&value_ty, "operand of ~", value.span);
                 value_ty
             }
             _ => CheckedType::Unknown,
@@ -474,6 +520,26 @@ impl Checker {
             Expr::FieldAccessExpr { object, .. } => {
                 self.check_assignment_target(object);
                 CheckedType::Unknown
+            }
+            Expr::IndexExpr { object, .. } => {
+                let obj_ty = self.infer_expr(object);
+                match &obj_ty {
+                    CheckedType::Named { name, args } if name == "Array" && args.len() == 2 => {
+                        args[0].clone()
+                    }
+                    CheckedType::Named { name, args } if name == "Vec" && args.len() == 1 => {
+                        args[0].clone()
+                    }
+                    CheckedType::Unknown => CheckedType::Unknown,
+                    other => {
+                        self.emit(
+                            span,
+                            ErrorCode::TypeMismatch,
+                            format!("cannot assign to index of {}", other.display()),
+                        );
+                        CheckedType::Unknown
+                    }
+                }
             }
             _ => {
                 self.emit(
@@ -961,5 +1027,211 @@ fn main(): i32 {
             diags.items.len(),
             diags.items
         );
+    }
+
+    // ---- Phase 2/3 feature coverage ----
+
+    fn assert_clean(diags: &Diagnostics) {
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics, got: {:?}",
+            diags.items
+        );
+    }
+
+    #[test]
+    fn struct_literal_and_field_access_typecheck() {
+        let diags = check_source(
+            r#"
+module main
+
+struct Point { x: i32 y: i32 }
+
+fn main(): i32 {
+    let p: Point = Point { x: 1, y: 2 }
+    let sum: i32 = p.x + p.y
+    return sum
+}
+"#,
+        );
+        assert_clean(&diags);
+    }
+
+    #[test]
+    fn rejects_struct_literal_wrong_field_type() {
+        let diags = check_source(
+            r#"
+module main
+
+struct Point { x: i32 y: i32 }
+
+fn main(): i32 {
+    let p: Point = Point { x: true, y: 2 }
+    return 0
+}
+"#,
+        );
+        assert!(first_message(&diags).contains("struct field \"x\" expects i32, got bool"));
+    }
+
+    #[test]
+    fn rejects_struct_literal_unknown_field() {
+        let diags = check_source(
+            r#"
+module main
+
+struct Point { x: i32 y: i32 }
+
+fn main(): i32 {
+    let p: Point = Point { x: 1, y: 2, z: 3 }
+    return 0
+}
+"#,
+        );
+        assert!(first_message(&diags).contains("struct \"Point\" has no field \"z\""));
+    }
+
+    #[test]
+    fn rejects_assignment_to_immutable_struct_field() {
+        let diags = check_source(
+            r#"
+module main
+
+struct Point { x: i32 }
+
+fn main(): i32 {
+    let p: Point = Point { x: 1 }
+    p.x = 5
+    return 0
+}
+"#,
+        );
+        assert!(first_message(&diags).contains("cannot assign to immutable variable \"p\""));
+    }
+
+    #[test]
+    fn for_in_over_array_typechecks() {
+        let diags = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    let nums: Array<i32, 3> = [1, 2, 3]
+    let mut sum: i32 = 0
+    for n in nums {
+        sum += n
+    }
+    return sum
+}
+"#,
+        );
+        assert_clean(&diags);
+    }
+
+    #[test]
+    fn for_in_over_vec_typechecks() {
+        let diags = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    let v: Vec<i32> = vec_new()
+    let mut sum: i32 = 0
+    for n in v {
+        sum += n
+    }
+    return sum
+}
+"#,
+        );
+        assert_clean(&diags);
+    }
+
+    #[test]
+    fn rejects_for_in_over_non_collection() {
+        let diags = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    let x: i32 = 5
+    for n in x {
+        return n
+    }
+    return 0
+}
+"#,
+        );
+        assert!(first_message(&diags).contains("for-in expects Slice<T> or Array<T, N>, got i32"));
+    }
+
+    #[test]
+    fn rejects_indexing_a_non_array() {
+        let diags = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    let x: i32 = 5
+    let y: i32 = x[0]
+    return y
+}
+"#,
+        );
+        assert!(first_message(&diags).contains("cannot index into i32"));
+    }
+
+    #[test]
+    fn rejects_non_integer_array_index() {
+        let diags = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    let nums: Array<i32, 3> = [1, 2, 3]
+    let y: i32 = nums[true]
+    return y
+}
+"#,
+        );
+        assert!(first_message(&diags).contains("array index must be an integer, got bool"));
+    }
+
+    #[test]
+    fn rejects_compound_assignment_with_wrong_type() {
+        // `sum += true` desugars to `sum = sum + true`; the + on a bool errors.
+        let diags = check_source(
+            r#"
+module main
+
+fn main(): i32 {
+    let mut sum: i32 = 0
+    sum += true
+    return sum
+}
+"#,
+        );
+        assert!(first_message(&diags).contains("right operand of + must be numeric, got bool"));
+    }
+
+    #[test]
+    fn match_on_option_typechecks() {
+        let diags = check_source(
+            r#"
+module main
+
+fn f(o: Option<i32>): i32 {
+    match o {
+        Some(v) => { return v }
+        None => { return 0 }
+    }
+}
+
+fn main(): i32 {
+    return 0
+}
+"#,
+        );
+        assert_clean(&diags);
     }
 }

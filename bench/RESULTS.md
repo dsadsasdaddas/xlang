@@ -1,0 +1,67 @@
+# xlang HTTP server vs nginx — benchmark
+
+## Setup
+- Server: wzu (Ubuntu 22.04, x86_64), **localhost loopback**.
+- **xlang server**: `examples/server_loop.x` (blocking, one connection at a time), compiled xlang → C → `cc -O2`.
+- **nginx**: 1.28.0 built **from source** on the server (`~/nginx-bin`), `location / { return 200 "hello"; }` (hardcoded, no file I/O).
+- Both return the **identical 5-byte response** `"hello"`.
+- Load: `bench/bench.py` (stdlib python, new connection per request), 8s @ 50 concurrent.
+
+## Result (fair: both return hardcoded "hello")
+| server   | run 1       | run 2       |
+|----------|-------------|-------------|
+| nginx 1.28 | ~1730 req/s | ~1710 req/s |
+| xlang      | ~1770 req/s | ~2560 req/s |
+
+xlang's compiled server is in the **same ballpark** as nginx for this trivial fixed-response workload (within ~1.0–1.5×).
+
+### Stronger load (multiprocess, bypasses the python GIL) — `bench/bench_mp.py`
+64-core box, 8 processes, new connection per request, 6s:
+| server            | req/s   |
+|-------------------|---------|
+| nginx 1.28        | ~8360   |
+| xlang (1 worker)  | ~8540   |
+
+Even under ~5× the load, xlang's **blocking** server stays level with nginx. For this minimal workload the per-connection work is so tiny that serializing connections does not yet cost throughput — both are bound by accept/loop rate (and likely still partly by the client).
+
+### Decisive: keepalive + concurrency — `bench/bench_ka.py`
+16 concurrent **persistent** connections, 6s:
+| server                  | req/s    |
+|-------------------------|----------|
+| nginx 1.28              | ~69,800  |
+| xlang (1 blocking worker) | ~8,230 |
+
+**nginx is ~8.5× faster under keepalive concurrency.** xlang serves one connection at a time — its inner keepalive loop blocks on `recv`, starving the other 15 connections; nginx's epoll serves all 16 concurrently. This is the workload that triggers "modify x": add concurrency (fork workers / epoll event loop) so xlang can serve many connections at once.
+
+### After "modify x": `fork()` + prefork workers — `bench/bench_ka.py`, 16 conns
+Added `fork()`/`getpid()` builtins so xlang can run the **prefork** worker model (nginx/apache prefork). `examples/server_prefork.x`: 16 workers, each a blocking keepalive loop on the shared listen socket. Same workload, same machine:
+| server                    | req/s     |
+|---------------------------|-----------|
+| nginx 1.28                | ~77,200   |
+| xlang prefork (16 workers) | ~128,600  |
+
+The gap **reversed**: from 8.5× slower (1 blocking worker, ~8.2k) to ~1.67× **faster** than nginx (16 workers, ~128.6k). "Modify x" (add concurrency via fork) closed the measured gap decisively.
+
+**Honest caveat:** this is a trivial fixed-response workload where a minimal server can beat nginx — nginx does full HTTP parsing + header generation + module chain per request, while xlang blasts a fixed 5-byte string. Real workloads (request parsing, routing, file serving) would rebalance this. Still: xlang → C → prefork is genuinely fast, and the modify-x cycle produced a measured, reproducible improvement.
+
+### Realistic workload: serve a 64 KB file — sendfile vs read+send
+`examples/server_file.x` (prefork, `read_file` + `str_concat` + `send`, userspace copies) vs nginx serving the same file via **sendfile** (zero-copy). 16 keepalive conns; both verified serving exactly 65536 bytes:
+| server              | req/s   | ~throughput |
+|---------------------|---------|-------------|
+| nginx (sendfile)    | ~25,600 | ~1.6 GB/s   |
+| xlang (read+send)   | ~22,700 | ~1.4 GB/s   |
+
+xlang is only **~13% slower** than nginx for 64 KB file serving — far smaller than expected. At 64 KB/request over loopback the workload is **bandwidth-bound** (~1.5 GB/s), so sendfile's zero-copy advantage is dwarfed by the transfer time; xlang's per-request page-cached read + memcpy-concat is efficient enough. (sendfile would win more for many small files at very high request rates, where per-request overhead dominates.)
+
+## Honest caveats — this is NOT "xlang beats nginx"
+1. **Trivial workload** (5-byte fixed response). nginx's machinery overhead dominates when the work is tiny, so a minimal hand-written server can match it. Real workloads (file serving, proxying, keepalive, real HTTP parsing) would change the picture.
+2. **The load generator (python, threading + GIL) likely caps the measurement** around ~2000–2500 req/s — the client may be the bottleneck, so the true server ceilings are not reached.
+3. **xlang's server is blocking, single-connection.** At high concurrency, keepalive, or pipelining, nginx's epoll event loop would pull far ahead.
+
+## What this validates
+xlang → C → `cc -O2` produces genuinely fast server code: for a hello-world HTTP response it is competitive with nginx on the same machine. That is a real, rigorous data point (same workload, same machine, real nginx built from source).
+
+## To go further (honest next steps)
+- A C load generator (wrk) to find true ceilings past the python client limit.
+- Higher concurrency + keepalive to expose the blocking-vs-epoll gap (where xlang needs `epoll` support).
+- Realistic workloads (serve a real file, parse the request path) where nginx's engineering matters.

@@ -53,3 +53,27 @@ jobs:
 
       - name: Run struct demo (literals + field access)
         run: make run-struct-demo
+
+      - name: Run print demo (output builtins)
+        run: make run-print-demo
+
+      - name: Run array-sum demo (for-in over Array)
+        run: make run-array-sum
+
+      - name: Run array-double demo (indexing + in-place write)
+        run: make run-array-double
+
+      - name: Run string-build demo (concat / len / int_to_str)
+        run: make run-string-build
+
+      - name: Run grades showcase (struct records + array processing)
+        run: make run-grades
+
+      - name: "Run Vec demo (dynamic array: push + iterate)"
+        run: make run-vec-demo
+
+      - name: Run file I/O demo (write + read back)
+        run: make run-file-io
+
+      - name: Run forward-reference demo (out-of-order functions)
+        run: make run-forward-ref

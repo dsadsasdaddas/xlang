@@ -50,8 +50,12 @@ impl Parser {
         self.peek().kind == TokenKind::Eof
     }
 
+    /// Does the current token have this text AND be a Symbol or Keyword?
+    /// Crucially this excludes String/Int/Ident tokens, so a string literal
+    /// like `"-"` (whose text is "-") is NOT confused with the minus operator.
     fn check(&self, text: &str) -> bool {
-        self.peek().text == text
+        let tok = self.peek();
+        tok.text == text && matches!(tok.kind, TokenKind::Symbol | TokenKind::Keyword)
     }
 
     fn cur_start(&self) -> u32 {
@@ -492,8 +496,18 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Result<Spanned<Expr>, Diagnostic> {
-        let mut expr = self.parse_term()?;
+        let mut expr = self.parse_bitwise()?;
         while matches!(self.peek().text.as_str(), ">" | ">=" | "<" | "<=") {
+            let op = self.bump().text;
+            let right = self.parse_bitwise()?;
+            expr = binary(op, expr, right);
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise(&mut self) -> Result<Spanned<Expr>, Diagnostic> {
+        let mut expr = self.parse_term()?;
+        while matches!(self.peek().text.as_str(), "&" | "|" | "^" | "<<" | ">>") {
             let op = self.bump().text;
             let right = self.parse_term()?;
             expr = binary(op, expr, right);
@@ -522,7 +536,7 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Spanned<Expr>, Diagnostic> {
-        if self.check("!") || self.check("-") {
+        if self.check("!") || self.check("-") || self.check("~") {
             let start = self.cur_start();
             let op = self.bump().text;
             let value = self.parse_unary()?;
@@ -567,6 +581,18 @@ impl Parser {
                     Expr::FieldAccessExpr {
                         object: Box::new(expr),
                         field,
+                    },
+                    span,
+                );
+            } else if self.match_text("[") {
+                let start = expr.span.start;
+                let index = self.parse_expr()?;
+                self.expect("]")?;
+                let span = Span::new(self.file_id, start, self.last_end);
+                expr = Spanned::new(
+                    Expr::IndexExpr {
+                        object: Box::new(expr),
+                        index: Box::new(index),
                     },
                     span,
                 );

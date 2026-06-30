@@ -30,7 +30,23 @@ impl CGen {
         self.emit("#include <stdint.h>");
         self.emit("#include <stdbool.h>");
         self.emit("#include <stddef.h>");
+        self.emit("#include <stdio.h>");
+        self.emit("#include <string.h>");
+        self.emit("#include <stdlib.h>");
+        self.emit("#include <time.h>");
+        self.emit("#include <locale.h>");
         self.emit("");
+        self.emit_runtime_preamble();
+        self.emit_networking_preamble();
+
+        // User struct definitions first, so wrapper typedefs (Array/Vec/...)
+        // that reference them (e.g. Array<Student, 3>) see a complete type.
+        for item in &program.items {
+            if let Item::StructDecl { .. } = &item.node {
+                self.gen_struct(&item.node)?;
+                self.emit("");
+            }
+        }
 
         for typedef in self.collect_runtime_typedefs(program)? {
             self.emit(&typedef);
@@ -39,12 +55,14 @@ impl CGen {
             self.emit("");
         }
 
+        // Forward declarations so functions can reference each other in any
+        // source order (a prerequisite for multi-file module merging too).
         for item in &program.items {
-            if let Item::StructDecl { .. } = &item.node {
-                self.gen_struct(&item.node)?;
-                self.emit("");
+            if let Item::FnDecl { .. } = &item.node {
+                self.gen_fn_prototype(&item.node)?;
             }
         }
+        self.emit("");
 
         for item in &program.items {
             match &item.node {
@@ -90,7 +108,38 @@ impl CGen {
                 }
             }
         }
-        Ok(typedefs.into_values().collect())
+        // Emit wrapper typedefs in dependency order (fixpoint): a wrapper whose
+        // definition references another not-yet-emitted wrapper must wait. This
+        // fixes nested wrappers (e.g. Array<Array<i32>, 3> needs Array_i32 first)
+        // which BTreeMap's alphabetical order would emit backwards.
+        let mut pending = typedefs;
+        let mut ordered: Vec<String> = Vec::new();
+        let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while !pending.is_empty() {
+            let names: Vec<String> = pending.keys().cloned().collect();
+            let mut progressed = false;
+            for name in &names {
+                let Some(def) = pending.get(name) else {
+                    continue;
+                };
+                let blocked = pending.keys().any(|other| {
+                    other != name && def.contains(other) && !emitted.contains(other)
+                });
+                if !blocked {
+                    ordered.push(def.clone());
+                    emitted.insert(name.clone());
+                    pending.remove(name);
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        for def in pending.into_values() {
+            ordered.push(def);
+        }
+        Ok(ordered)
     }
 
     fn collect_block_typedefs(
@@ -220,6 +269,29 @@ impl CGen {
                 )
             });
         }
+        if name == "Vec" {
+            if args.len() != 1 {
+                return Err(XError::Codegen(format!(
+                    "Vec expects exactly one type argument, got {}",
+                    args.len()
+                )));
+            }
+            let elem_ty = &args[0];
+            let alias = self.c_type(ty)?;
+            let elem_c = self.c_type(elem_ty)?;
+            let elem_suffix = self.c_type_suffix(elem_ty)?;
+            typedefs.entry(alias.clone()).or_insert_with(|| {
+                format!(
+                    "typedef struct {{\n    {elem_c} *data;\n    size_t len;\n    size_t cap;\n}} {alias};"
+                )
+            });
+            let push_name = format!("__xlang_vec_push_{elem_suffix}");
+            typedefs.entry(push_name.clone()).or_insert_with(|| {
+                format!(
+                    "void {push_name}({alias} *v, {elem_c} x) {{\n    if (v->len == v->cap) {{\n        v->cap = v->cap ? v->cap * 2 : 4;\n        v->data = ({elem_c} *)realloc(v->data, v->cap * sizeof({elem_c}));\n    }}\n    v->data[v->len++] = x;\n}}"
+                )
+            });
+        }
         Ok(())
     }
 
@@ -254,6 +326,9 @@ impl CGen {
                     self.c_type_suffix(&args[0])?,
                     self.c_type_suffix(&args[1])?
                 ))
+            }
+            TypeNode::TypeExpr { name, args } if name == "Vec" && args.len() == 1 => {
+                Ok(format!("Vec_{}", self.c_type_suffix(&args[0])?))
             }
             TypeNode::TypeExpr { name, .. } => Err(XError::Codegen(format!(
                 "C backend does not support generic type yet: {name}<...>"
@@ -290,6 +365,9 @@ impl CGen {
                     self.c_type_suffix(&args[0])?,
                     self.c_type_suffix(&args[1])?
                 ))
+            }
+            TypeNode::TypeExpr { name, args } if name == "Vec" && args.len() == 1 => {
+                Ok(format!("Vec_{}", self.c_type_suffix(&args[0])?))
             }
             TypeNode::TypeExpr { name, .. } => Err(XError::Codegen(format!(
                 "C backend does not support {name}<...> as a generated type suffix yet"
@@ -347,6 +425,33 @@ impl CGen {
         Ok(())
     }
 
+    /// Emit a forward declaration so functions may appear in any source order.
+    fn gen_fn_prototype(&mut self, item: &Item) -> XResult<()> {
+        let Item::FnDecl {
+            name,
+            params,
+            return_type,
+            ..
+        } = item
+        else {
+            unreachable!();
+        };
+        let ret = self.c_type(return_type)?;
+        let params_text = if name == "main" && params.is_empty() {
+            "int argc, char** argv".to_string()
+        } else if params.is_empty() {
+            "void".to_string()
+        } else {
+            let mut parts = Vec::new();
+            for param in params {
+                parts.push(format!("{} {}", self.c_type(&param.ty)?, param.name));
+            }
+            parts.join(", ")
+        };
+        self.emit(&format!("{ret} {name}({params_text});"));
+        Ok(())
+    }
+
     fn gen_fn(&mut self, item: &Item) -> XResult<()> {
         let Item::FnDecl {
             name,
@@ -358,7 +463,10 @@ impl CGen {
             unreachable!();
         };
         let ret = self.c_type(return_type)?;
-        let params_text = if params.is_empty() {
+        let is_main = name == "main" && params.is_empty();
+        let params_text = if is_main {
+            "int argc, char** argv".to_string()
+        } else if params.is_empty() {
             "void".to_string()
         } else {
             let mut parts = Vec::new();
@@ -372,6 +480,10 @@ impl CGen {
         self.push_scope();
         for param in params {
             self.declare_var(&param.name, param.ty.clone());
+        }
+        if is_main {
+            self.emit("__xlang_argc_g = argc;");
+            self.emit("__xlang_argv_g = argv;");
         }
         self.fn_return = Some(return_type.clone());
         for stmt in &body.statements {
@@ -502,6 +614,19 @@ impl CGen {
                 }
                 _ => Ok(None),
             },
+            ("Vec", 1) => match &value.node {
+                Expr::CallExpr {
+                    callee,
+                    args: cargs,
+                } if matches!(&callee.node, Expr::Identifier { name: n } if n == "vec_new")
+                    && cargs.is_empty() =>
+                {
+                    Ok(Some(format!(
+                        "({alias}){{ .data = 0, .len = 0, .cap = 0 }}"
+                    )))
+                }
+                _ => Ok(None),
+            },
             _ => Ok(None),
         }
     }
@@ -591,25 +716,40 @@ impl CGen {
                 "unknown iterable {iterable_name:?} in for loop"
             )));
         };
-        if name != "Slice" || args.len() != 1 {
-            return Err(XError::Codegen(format!(
-                "C backend only supports for-in over Slice<T>, got {name}<...>"
-            )));
-        }
-        let elem_ty = args[0].clone();
-        let elem_c_type = self.c_type(&elem_ty)?;
         let iter_c = self.gen_expr(iterable)?;
+        // Loop bound + element source differ: Slice uses a runtime `.len`;
+        // Array<T, N> uses the compile-time N. Both store elements in `.data`.
+        let (elem_ty, bound, data) = match (name.as_str(), args.len()) {
+            ("Slice", 1) => (
+                args[0].clone(),
+                format!("{iter_c}.len"),
+                format!("{iter_c}.data"),
+            ),
+            ("Array", 2) => {
+                let n = self.const_type_arg_value(&args[1], "Array length")?;
+                (args[0].clone(), n.to_string(), format!("{iter_c}.data"))
+            }
+            ("Vec", 1) => (
+                args[0].clone(),
+                format!("{iter_c}.len"),
+                format!("{iter_c}.data"),
+            ),
+            _ => {
+                return Err(XError::Codegen(format!(
+                    "C backend only supports for-in over Slice<T> or Array<T, N>, got {name}<...>"
+                )));
+            }
+        };
+        let elem_c_type = self.c_type(&elem_ty)?;
         let index = self.next_temp("i");
 
         self.emit(&format!(
-            "for (size_t {index} = 0; {index} < {iter_c}.len; {index}++) {{"
+            "for (size_t {index} = 0; {index} < {bound}; {index}++) {{"
         ));
         self.indent += 1;
         self.push_scope();
         self.declare_var(iterator, elem_ty);
-        self.emit(&format!(
-            "{elem_c_type} {iterator} = {iter_c}.data[{index}];"
-        ));
+        self.emit(&format!("{elem_c_type} {iterator} = {data}[{index}];"));
         for inner in &body.statements {
             self.gen_stmt(inner)?;
         }
@@ -708,10 +848,596 @@ impl CGen {
         Ok(())
     }
 
+    /// Recognise the print builtins (`print_i32`/`print_f64`/`print_str`/
+    /// `print_bool`) and lower a one-arg call to a `printf`; returns None for
+    /// anything else so the normal call path handles it.
+    /// Emit the small C runtime preamble — helpers that need allocation (string
+    /// concatenation, int->str). Non-static so an unused helper doesn't trip
+    /// -Wunused-function.
+    fn emit_runtime_preamble(&mut self) {
+        let lines = [
+            "int __xlang_argc_g = 0;",
+            "char** __xlang_argv_g = 0;",
+            "char* __xlang_str_concat(const char* a, const char* b) {",
+            "    size_t la = strlen(a), lb = strlen(b);",
+            "    char* out = (char*)malloc(la + lb + 1);",
+            "    memcpy(out, a, la);",
+            "    memcpy(out + la, b, lb);",
+            "    out[la + lb] = 0;",
+            "    return out;",
+            "}",
+            "char* __xlang_int_to_str(int32_t n) {",
+            "    char* buf = (char*)malloc(16);",
+            "    snprintf(buf, 16, \"%d\", n);",
+            "    return buf;",
+            "}",
+            "char* __xlang_read_stdin() {",
+            "    size_t cap = 65536, len = 0;",
+            "    char* buf = (char*)malloc(cap);",
+            "    size_t r;",
+            "    while ((r = fread(buf + len, 1, cap - len, stdin)) > 0) {",
+            "        len += r;",
+            "        if (len + 1 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }",
+            "    }",
+            "    buf[len] = 0;",
+            "    return buf;",
+            "}",
+            "char* __xlang_read_file(const char* path) {",
+            "    FILE* f = fopen(path, \"rb\");",
+            "    if (!f) { char* e = (char*)malloc(1); e[0] = 0; return e; }",
+            "    size_t cap = 65536, len = 0;",
+            "    char* buf = (char*)malloc(cap);",
+            "    size_t r;",
+            "    while ((r = fread(buf + len, 1, cap - len, f)) > 0) {",
+            "        len += r;",
+            "        if (len + 1 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }",
+            "    }",
+            "    buf[len] = 0; fclose(f);",
+            "    return buf;",
+            "}",
+            "void __xlang_write_file(const char* path, const char* content) {",
+            "    FILE* f = fopen(path, \"wb\");",
+            "    if (!f) return;",
+            "    fwrite(content, 1, strlen(content), f); fclose(f);",
+            "}",
+            "int32_t __xlang_str_find(const char* s, const char* sub) {",
+            "    const char* p = strstr(s, sub);",
+            "    return p ? (int32_t)(p - s) : -1;",
+            "}",
+            "char* __xlang_str_slice(const char* s, int32_t start, int32_t end) {",
+            "    if (start < 0) start = 0;",
+            "    if (end < start) end = start;",
+            "    int32_t len = end - start;",
+            "    char* out = (char*)malloc((size_t)len + 1);",
+            "    memcpy(out, s + start, (size_t)len); out[len] = 0;",
+            "    return out;",
+            "}",
+            "char* __xlang_str_reverse(const char* s) {",
+            "    int32_t n = (int32_t)strlen(s);",
+            "    char* out = (char*)malloc(n + 1);",
+            "    for (int32_t i = 0; i < n; i++) out[i] = s[n - 1 - i];",
+            "    out[n] = 0;",
+            "    return out;",
+            "}",
+            "char* __xlang_str_translate(const char* s, const char* from, const char* to) {",
+            "    int32_t n = (int32_t)strlen(s);",
+            "    int32_t tn = (int32_t)strlen(to);",
+            "    char* out = (char*)malloc(n + 1);",
+            "    for (int32_t i = 0; i < n; i++) {",
+            "        char* p = strchr(from, s[i]);",
+            "        out[i] = (p && (p - from) < tn) ? to[p - from] : s[i];",
+            "    }",
+            "    out[n] = 0;",
+            "    return out;",
+            "}",
+            "char* __xlang_read_line() {",
+            "    char* buf = (char*)malloc(65536);",
+            "    if (!fgets(buf, 65536, stdin)) { buf[0] = 0; return buf; }",
+            "    int32_t n = (int32_t)strlen(buf);",
+            "    if (n > 0 && buf[n - 1] == '\\n') buf[n - 1] = 0;",
+            "    return buf;",
+            "}",
+            "static char* __sb_buf = 0;",
+            "static size_t __sb_len = 0;",
+            "static size_t __sb_cap = 0;",
+            "void __xlang_sb_new() {",
+            "    if (!__sb_buf) { __sb_buf = (char*)malloc(65536); __sb_cap = 65536; }",
+            "    __sb_len = 0; __sb_buf[0] = 0;",
+            "}",
+            "void __xlang_sb_push(const char* s) {",
+            "    size_t sl = strlen(s);",
+            "    if (__sb_len + sl + 1 > __sb_cap) {",
+            "        while (__sb_len + sl + 1 > __sb_cap) __sb_cap *= 2;",
+            "        __sb_buf = (char*)realloc(__sb_buf, __sb_cap);",
+            "    }",
+            "    memcpy(__sb_buf + __sb_len, s, sl);",
+            "    __sb_len += sl;",
+            "    __sb_buf[__sb_len] = 0;",
+            "}",
+            "const char* __xlang_sb_str() {",
+            "    return __sb_buf ? __sb_buf : \"\";",
+            "}",
+            "void __xlang_sb_push_char(int32_t c) {",
+            "    if (__sb_len + 2 > __sb_cap) { __sb_cap *= 2; __sb_buf = (char*)realloc(__sb_buf, __sb_cap); }",
+            "    __sb_buf[__sb_len++] = (char)c;",
+            "    __sb_buf[__sb_len] = 0;",
+            "}",
+            "char* __xlang_time_str() {",
+            "    setlocale(LC_TIME, \"\");",
+            "    time_t t = time(NULL);",
+            "    struct tm* tm = localtime(&t);",
+            "    char* s = (char*)malloc(64);",
+            "    strftime(s, 64, \"%a %b %e %H:%M:%S %Z %Y\", tm);",
+            "    return s;",
+            "}",
+            "",
+        ];
+        for line in lines {
+            self.emit(line);
+        }
+    }
+
+    /// Networking helpers (socket I/O), guarded so non-Linux builds (which lack
+    /// these POSIX headers) skip them entirely. Programs use networking only on
+    /// Linux (CI / the target server); on Windows the block is preprocessed out,
+    /// so the run-safe tests (which cc the generated C locally) still pass.
+    fn emit_networking_preamble(&mut self) {
+        let lines = [
+            "#if !defined(_WIN32)",
+            "#include <unistd.h>",
+            "#include <sys/socket.h>",
+            "#include <netinet/in.h>",
+            "#include <arpa/inet.h>",
+            "#include <dirent.h>",
+            "#include <sys/stat.h>",
+            "#include <signal.h>",
+            "#include <sys/utsname.h>",
+            "#include <sys/epoll.h>",
+            "#include <fcntl.h>",
+            "#include <sys/sendfile.h>",
+            "int32_t __xlang_tcp_listen(int32_t port) {",
+            "    int fd = socket(AF_INET, SOCK_STREAM, 0);",
+            "    int opt = 1;",
+            "    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));",
+            "    struct sockaddr_in addr;",
+            "    addr.sin_family = AF_INET;",
+            "    addr.sin_addr.s_addr = INADDR_ANY;",
+            "    addr.sin_port = htons((uint16_t)port);",
+            "    bind(fd, (struct sockaddr*)&addr, sizeof(addr));",
+            "    listen(fd, 64);",
+            "    return (int32_t)fd;",
+            "}",
+            "char* __xlang_recv_str(int32_t fd) {",
+            "    static char buf[65536];",
+            "    ssize_t n = recv(fd, buf, 65535, 0);",
+            "    if (n < 0) n = 0;",
+            "    buf[n] = 0;",
+            "    return buf;",
+            "}",
+            "// epoll event-loop support. A single global epoll fd + a ready-fd",
+            "// ring buffer, so xlang treats epoll_wait(timeout) as \"next ready fd\".",
+            "#define __XLANG_EPQ_CAP 8192",
+            "static int32_t __xlang_epfd_g = -1;",
+            "static int __xlang_epq_fd[__XLANG_EPQ_CAP];",
+            "static int __xlang_epq_head = 0;",
+            "static int __xlang_epq_tail = 0;",
+            "int32_t __xlang_epoll_create() {",
+            "    __xlang_epfd_g = epoll_create1(0);",
+            "    return __xlang_epfd_g;",
+            "}",
+            "int32_t __xlang_epoll_add(int32_t fd) {",
+            "    struct epoll_event ev;",
+            "    ev.events = EPOLLIN;",
+            "    ev.data.fd = fd;",
+            "    return epoll_ctl(__xlang_epfd_g, EPOLL_CTL_ADD, fd, &ev) == 0 ? 0 : -1;",
+            "}",
+            "int32_t __xlang_epoll_del(int32_t fd) {",
+            "    epoll_ctl(__xlang_epfd_g, EPOLL_CTL_DEL, fd, 0);",
+            "    return 0;",
+            "}",
+            "int32_t __xlang_epoll_wait(int32_t timeout) {",
+            "    if (__xlang_epq_head != __xlang_epq_tail) {",
+            "        int fd = __xlang_epq_fd[__xlang_epq_head];",
+            "        __xlang_epq_head = (__xlang_epq_head + 1) % __XLANG_EPQ_CAP;",
+            "        return (int32_t)fd;",
+            "    }",
+            "    struct epoll_event events[256];",
+            "    int n = epoll_wait(__xlang_epfd_g, events, 256, timeout);",
+            "    if (n <= 0) return -1;",
+            "    int i;",
+            "    for (i = 0; i < n; i++) {",
+            "        __xlang_epq_fd[__xlang_epq_tail] = events[i].data.fd;",
+            "        __xlang_epq_tail = (__xlang_epq_tail + 1) % __XLANG_EPQ_CAP;",
+            "    }",
+            "    int fd = __xlang_epq_fd[__xlang_epq_head];",
+            "    __xlang_epq_head = (__xlang_epq_head + 1) % __XLANG_EPQ_CAP;",
+            "    return (int32_t)fd;",
+            "}",
+            "int32_t __xlang_set_nonblock(int32_t fd) {",
+            "    int flags = fcntl(fd, F_GETFL, 0);",
+            "    return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 ? 0 : -1;",
+            "}",
+            "int32_t __xlang_open_read(const char* path) {",
+            "    return (int32_t)open(path, O_RDONLY);",
+            "}",
+            "int32_t __xlang_sendfile_fd(int32_t out_fd, int32_t in_fd, int32_t len) {",
+            "    off_t off = 0;",
+            "    size_t remaining = (size_t)len;",
+            "    while (remaining > 0) {",
+            "        ssize_t s = sendfile(out_fd, in_fd, &off, remaining);",
+            "        if (s <= 0) break;",
+            "        remaining -= (size_t)s;",
+            "    }",
+            "    return (int32_t)((size_t)len - remaining);",
+            "}",
+            "int32_t __xlang_dir_count(const char* path) {",
+            "    DIR* d = opendir(path);",
+            "    if (!d) return 0;",
+            "    int32_t n = 0;",
+            "    while (readdir(d)) n++;",
+            "    closedir(d);",
+            "    return n;",
+            "}",
+            "char* __xlang_dir_entry(const char* path, int32_t idx) {",
+            "    DIR* d = opendir(path);",
+            "    if (!d) return \"\";",
+            "    struct dirent* e;",
+            "    int32_t i = 0;",
+            "    while ((e = readdir(d))) {",
+            "        if (i == idx) {",
+            "            char* copy = (char*)malloc(strlen(e->d_name) + 1);",
+            "            strcpy(copy, e->d_name);",
+            "            closedir(d);",
+            "            return copy;",
+            "        }",
+            "        i++;",
+            "    }",
+            "    closedir(d);",
+            "    return \"\";",
+            "}",
+            "int32_t __xlang_is_dir(const char* path) {",
+            "    struct stat st;",
+            "    if (stat(path, &st) != 0) return 0;",
+            "    return S_ISDIR(st.st_mode) ? 1 : 0;",
+            "}",
+            "int32_t __xlang_file_size(const char* path) {",
+            "    struct stat st;",
+            "    if (stat(path, &st) != 0) return 0;",
+            "    return (int32_t)st.st_size;",
+            "}",
+            "int32_t __xlang_file_exists(const char* path) {",
+            "    struct stat st;",
+            "    return stat(path, &st) == 0 ? 1 : 0;",
+            "}",
+            "char* __xlang_getcwd() {",
+            "    char* buf = (char*)malloc(4096);",
+            "    return getcwd(buf, 4096);",
+            "}",
+            "char* __xlang_readlink(const char* path) {",
+            "    char* buf = (char*)malloc(4096);",
+            "    ssize_t n = readlink(path, buf, 4095);",
+            "    if (n < 0) { buf[0] = 0; return buf; }",
+            "    buf[n] = 0;",
+            "    return buf;",
+            "}",
+            "char* __xlang_realpath(const char* path) {",
+            "    char* resolved = realpath(path, NULL);",
+            "    return resolved ? resolved : \"\";",
+            "}",
+            "extern char** environ;",
+            "int32_t __xlang_env_count() {",
+            "    int32_t n = 0;",
+            "    while (environ[n]) n++;",
+            "    return n;",
+            "}",
+            "const char* __xlang_env_entry(int32_t idx) {",
+            "    extern char** environ;",
+            "    int32_t n = 0;",
+            "    while (environ[n]) {",
+            "        if (n == idx) return environ[n];",
+            "        n++;",
+            "    }",
+            "    return \"\";",
+            "}",
+            "const char* __xlang_tty() {",
+            "    char* name = ttyname(0);",
+            "    return name ? name : \"\";",
+            "}",
+            "const char* __xlang_uname_machine() {",
+            "    struct utsname u;",
+            "    if (uname(&u) != 0) return \"\";",
+            "    char* m = (char*)malloc(strlen(u.machine) + 1);",
+            "    strcpy(m, u.machine);",
+            "    return m;",
+            "}",
+            "#endif",
+            "",
+        ];
+        for line in lines {
+            self.emit(line);
+        }
+    }
+
+    /// Lower the string builtins `str_len` / `str_concat` / `int_to_str`
+    /// (strlen inline; the other two call the runtime-preamble helpers).
+    fn try_string_call(
+        &self,
+        callee: &Spanned<Expr>,
+        args: &[Spanned<Expr>],
+    ) -> XResult<Option<String>> {
+        let Expr::Identifier { name } = &callee.node else {
+            return Ok(None);
+        };
+        let Some(first) = args.first() else {
+            return Ok(None);
+        };
+        let a = self.gen_expr(first)?;
+        let rendered = match name.as_str() {
+            "str_len" => format!("(int32_t)strlen({a})"),
+            "argv" => format!("__xlang_argv_g[{a}]"),
+            "print_raw" => format!("printf(\"%s\", {a})"),
+            "int_to_str" => format!("__xlang_int_to_str({a})"),
+            "str_concat" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_str_concat({a}, {b})")
+            }
+            "str_eq" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("(strcmp({a}, {b}) == 0)")
+            }
+            "str_find" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_str_find({a}, {b})")
+            }
+            "str_slice" => {
+                if args.len() < 3 {
+                    return Ok(None);
+                }
+                let b = self.gen_expr(&args[1])?;
+                let c = self.gen_expr(&args[2])?;
+                format!("__xlang_str_slice({a}, {b}, {c})")
+            }
+            "str_reverse" => format!("__xlang_str_reverse({a})"),
+            "str_translate" => {
+                let (Some(second), Some(third)) = (args.get(1), args.get(2)) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                let c = self.gen_expr(third)?;
+                format!("__xlang_str_translate({a}, {b}, {c})")
+            }
+            "str_char_at" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("(int32_t)(unsigned char)({a}[{b}])")
+            }
+            "dir_count" => format!("__xlang_dir_count({a})"),
+            "is_dir" => format!("__xlang_is_dir({a})"),
+            "file_size" => format!("__xlang_file_size({a})"),
+            "file_exists" => format!("__xlang_file_exists({a})"),
+            "chdir" => format!("chdir(({a}))"),
+            "make_dir" => format!("mkdir({a}, 0755)"),
+            "kill" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("kill(({a}), ({b}))")
+            }
+            "random_int" => format!("(int32_t)(rand() % ({a}))"),
+            "sb_push" => format!("__xlang_sb_push({a})"),
+            "sb_push_char" => format!("__xlang_sb_push_char({a})"),
+            "getenv" => format!("(getenv({a}) ? getenv({a}) : \"\")"),
+            "readlink" => format!("__xlang_readlink({a})"),
+            "realpath" => format!("__xlang_realpath({a})"),
+            "env_entry" => format!("__xlang_env_entry({a})"),
+            "link_file" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("link(({a}), ({b}))")
+            }
+            "truncate_file" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("truncate(({a}), ({b}))")
+            }
+            "mkfifo" => format!("mkfifo(({a}), 0644)"),
+            "rmdir" => format!("rmdir(({a}))"),
+            "str_to_int_oct" => format!("(int32_t)strtol({a}, 0, 8)"),
+            "chmod" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("chmod(({a}), ({b}))")
+            }
+            "symlink" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("symlink(({a}), ({b}))")
+            }
+            "dir_entry" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_dir_entry({a}, {b})")
+            }
+            "str_cmp" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("(int32_t)strcmp({a}, {b})")
+            }
+            "vec_len" => format!("((int32_t)({a}).len)"),
+            "str_to_int" => format!("(int32_t)strtol({a}, 0, 10)"),
+            "remove_file" => format!("remove({a})"),
+            "system" => format!("system({a})"),
+            "sleep_sec" => format!("(unsigned)sleep(({a}))"),
+            "rename_file" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("rename({a}, {b})")
+            }
+            "read_file" => format!("__xlang_read_file({a})"),
+            "write_file" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_write_file({a}, {b})")
+            }
+            "tcp_listen" => format!("__xlang_tcp_listen({a})"),
+            "accept" => format!("accept({a}, 0, 0)"),
+            "recv_str" => format!("__xlang_recv_str({a})"),
+            "close_fd" => format!("close({a})"),
+            "epoll_add" => format!("__xlang_epoll_add({a})"),
+            "epoll_del" => format!("__xlang_epoll_del({a})"),
+            "epoll_wait" => format!("__xlang_epoll_wait({a})"),
+            "set_nonblock" => format!("__xlang_set_nonblock({a})"),
+            "open_read" => format!("__xlang_open_read({a})"),
+            "sendfile_fd" => {
+                let (Some(second), Some(third)) = (args.get(1), args.get(2)) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                let c = self.gen_expr(third)?;
+                format!("__xlang_sendfile_fd({a}, {b}, {c})")
+            }
+            "send_str" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("send({a}, {b}, strlen({b}), 0)")
+            }
+            "send_bytes" => {
+                let (Some(second), Some(third)) = (args.get(1), args.get(2)) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                let c = self.gen_expr(third)?;
+                format!("send({a}, {b}, (size_t)({c}), 0)")
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(rendered))
+    }
+
+    /// Lower `v.push(x)` on a `Vec<T>` variable to a call of the per-element
+    /// runtime helper `__xlang_vec_push_T(&v, x)` (emitted in the typedef pass).
+    fn try_vec_push_call(
+        &self,
+        callee: &Spanned<Expr>,
+        args: &[Spanned<Expr>],
+    ) -> XResult<Option<String>> {
+        let Expr::FieldAccessExpr { object, field } = &callee.node else {
+            return Ok(None);
+        };
+        if field != "push" || args.len() != 1 {
+            return Ok(None);
+        }
+        let Expr::Identifier { name: vname } = &object.node else {
+            return Ok(None);
+        };
+        let Some(TypeNode::TypeExpr { name, args: targs }) = self.lookup_var(vname) else {
+            return Ok(None);
+        };
+        if name != "Vec" || targs.len() != 1 {
+            return Ok(None);
+        }
+        let elem_suffix = self.c_type_suffix(&targs[0])?;
+        let v_c = self.gen_expr(object)?;
+        let x_c = self.gen_expr(&args[0])?;
+        Ok(Some(format!(
+            "__xlang_vec_push_{elem_suffix}(&{v_c}, {x_c})"
+        )))
+    }
+
+    /// Zero-argument builtins (`fork`, `getpid`) — lower to the C calls. They
+    /// need <unistd.h>, which the guarded networking preamble includes on Linux.
+    fn try_zero_arg_call(
+        &self,
+        callee: &Spanned<Expr>,
+        args: &[Spanned<Expr>],
+    ) -> XResult<Option<String>> {
+        if !args.is_empty() {
+            return Ok(None);
+        }
+        let Expr::Identifier { name } = &callee.node else {
+            return Ok(None);
+        };
+        Ok(Some(match name.as_str() {
+            "fork" => "fork()".to_string(),
+            "getpid" => "getpid()".to_string(),
+            "epoll_create" => "__xlang_epoll_create()".to_string(),
+            "argc" => "(__xlang_argc_g)".to_string(),
+            "read_stdin" => "__xlang_read_stdin()".to_string(),
+            "read_line" => "__xlang_read_line()".to_string(),
+            "sb_new" => "__xlang_sb_new()".to_string(),
+            "sb_str" => "__xlang_sb_str()".to_string(),
+            "time_str" => "__xlang_time_str()".to_string(),
+            "random_seed" => "srand((unsigned)time(NULL))".to_string(),
+            "getcwd" => "__xlang_getcwd()".to_string(),
+            "env_count" => "__xlang_env_count()".to_string(),
+            "tty" => "__xlang_tty()".to_string(),
+            "uname_machine" => "__xlang_uname_machine()".to_string(),
+            _ => return Ok(None),
+        }))
+    }
+
+    fn try_print_call(
+        &self,
+        callee: &Spanned<Expr>,
+        args: &[Spanned<Expr>],
+    ) -> XResult<Option<String>> {
+        let Expr::Identifier { name } = &callee.node else {
+            return Ok(None);
+        };
+        if args.len() != 1 {
+            return Ok(None);
+        }
+        self.try_print_builtin(name, &args[0])
+    }
+
+    fn try_print_builtin(&self, name: &str, arg: &Spanned<Expr>) -> XResult<Option<String>> {
+        let arg_c = self.gen_expr(arg)?;
+        let rendered = match name {
+            "print_i32" => format!("printf(\"%d\\n\", {arg_c})"),
+            "print_f64" => format!("printf(\"%f\\n\", {arg_c})"),
+            "print_str" => format!("printf(\"%s\\n\", {arg_c})"),
+            "print_bool" => format!("printf(\"%s\\n\", ({arg_c}) ? \"true\" : \"false\")"),
+            _ => return Ok(None),
+        };
+        Ok(Some(rendered))
+    }
+
     fn gen_expr(&self, expr: &Spanned<Expr>) -> XResult<String> {
         match &expr.node {
             Expr::IntLiteral { value } | Expr::FloatLiteral { value } => Ok(value.clone()),
-            Expr::StringLiteral { value } => Ok(serde_json::to_string(value)?),
+            Expr::StringLiteral { value } => {
+                Ok(serde_json::to_string(value)?.replace("\\u001b", "\\x1b"))
+            }
             Expr::BoolLiteral { value } => Ok(if *value { "true" } else { "false" }.to_string()),
             Expr::Identifier { name } => Ok(name.clone()),
             Expr::ArrayLiteral { .. } => Err(XError::Codegen(
@@ -731,6 +1457,18 @@ impl CGen {
                 self.gen_expr(value)?
             )),
             Expr::CallExpr { callee, args } => {
+                if let Some(rendered) = self.try_zero_arg_call(callee, args)? {
+                    return Ok(rendered);
+                }
+                if let Some(rendered) = self.try_print_call(callee, args)? {
+                    return Ok(rendered);
+                }
+                if let Some(rendered) = self.try_string_call(callee, args)? {
+                    return Ok(rendered);
+                }
+                if let Some(rendered) = self.try_vec_push_call(callee, args)? {
+                    return Ok(rendered);
+                }
                 let mut parts = Vec::new();
                 for arg in args {
                     parts.push(self.gen_expr(arg)?);
@@ -747,6 +1485,118 @@ impl CGen {
                 }
                 Ok(format!("({name}){{ {} }}", parts.join(", ")))
             }
+            Expr::IndexExpr { object, index } => {
+                // Both Array<T,N> and Slice<T> store elements in `.data`, so
+                // indexing lowers uniformly.
+                Ok(format!(
+                    "{}.data[{}]",
+                    self.gen_expr(object)?,
+                    self.gen_expr(index)?
+                ))
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CGen;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn gen_c(source: &str) -> String {
+        let (tokens, _) = Lexer::new(source).tokenize();
+        let program = Parser::new(tokens, "<test>").parse().expect("parse source");
+        CGen::new().generate(&program).expect("codegen")
+    }
+
+    #[test]
+    fn lowers_option_match_to_if_else() {
+        let c = gen_c(
+            "module main\nfn f(o: Option<i32>): i32 { match o { Some(v) => { return v } None => { return 0 } } }\nfn main(): i32 { return 0 }",
+        );
+        assert!(c.contains("typedef struct"), "no Option struct: {c}");
+        assert!(c.contains(".some"), "no .some field: {c}");
+        assert!(c.contains("if (o.some)"), "no match lowering: {c}");
+    }
+
+    #[test]
+    fn lowers_result_match_to_if_else() {
+        let c = gen_c(
+            "module main\nfn f(r: Result<i32, String>): i32 { match r { Ok(v) => { return v } Err(e) => { return 0 } } }\nfn main(): i32 { return 0 }",
+        );
+        assert!(c.contains(".ok"), "no .ok field: {c}");
+        assert!(c.contains("if (r.ok)"), "no result match lowering: {c}");
+    }
+
+    #[test]
+    fn emits_struct_literal_compound() {
+        let c = gen_c(
+            "module main\nstruct P { x: i32 }\nfn main(): i32 { let p: P = P { x: 1 } return p.x }",
+        );
+        assert!(c.contains("(P){ .x ="), "no struct literal: {c}");
+    }
+
+    #[test]
+    fn emits_vec_push_helper_call() {
+        let c = gen_c(
+            "module main\nfn main(): i32 { let mut v: Vec<i32> = vec_new() v.push(1) return 0 }",
+        );
+        assert!(c.contains("__xlang_vec_push_i32(&v,"), "no vec push: {c}");
+    }
+
+    #[test]
+    fn emits_fork_call() {
+        let c = gen_c("module main\nfn main(): i32 { let p: i32 = fork() return p }");
+        assert!(c.contains("fork();"), "no fork: {c}");
+    }
+
+    #[test]
+    fn lowers_for_in_over_array() {
+        let c = gen_c(
+            "module main\nfn main(): i32 { let a: Array<i32, 3> = [1, 2, 3] for n in a { print_i32(n) } return 0 }",
+        );
+        assert!(c.contains("< 3;"), "no array bound N: {c}");
+        assert!(c.contains(".data["), "no .data index: {c}");
+    }
+
+    #[test]
+    fn emits_print_printf() {
+        let c = gen_c("module main\nfn main(): i32 { print_i32(42) return 0 }");
+        assert!(c.contains("printf("), "no printf: {c}");
+    }
+
+    #[test]
+    fn emits_array_literal_initializer() {
+        let c = gen_c("module main\nfn main(): i32 { let a: Array<i32, 2> = [1, 2] return 0 }");
+        assert!(c.contains(".data = {"), "no array literal init: {c}");
+    }
+
+    #[test]
+    fn emits_function_prototype() {
+        let c = gen_c(
+            "module main\nfn helper(x: i32): i32 { return x }\nfn main(): i32 { return helper(1) }",
+        );
+        assert!(
+            c.contains("int32_t helper(int32_t x);"),
+            "no prototype: {c}"
+        );
+    }
+
+    #[test]
+    fn emits_str_eq_as_strcmp() {
+        let c = gen_c(
+            "module main\nfn f(a: String, b: String): bool { return str_eq(a, b) }\nfn main(): i32 { return 0 }",
+        );
+        assert!(c.contains("strcmp("), "no strcmp for str_eq: {c}");
+    }
+
+    #[test]
+    fn emits_str_find_and_slice_helpers() {
+        let c = gen_c(
+            "module main\nfn main(): i32 { let s: String = \"hi\" let i: i32 = str_find(s, \"h\") let t: String = str_slice(s, 0, 1) return 0 }",
+        );
+        assert!(c.contains("__xlang_str_find("), "no str_find: {c}");
+        assert!(c.contains("__xlang_str_slice("), "no str_slice: {c}");
     }
 }
