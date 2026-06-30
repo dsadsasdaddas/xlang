@@ -1003,6 +1003,7 @@ impl CGen {
             "#include <netinet/tcp.h>",
             "#include <errno.h>",
             "#include <sched.h>",
+            "#include <sys/wait.h>",
             "int32_t __xlang_tcp_listen(int32_t port) {",
             "    int fd = socket(AF_INET, SOCK_STREAM, 0);",
             "    int opt = 1;",

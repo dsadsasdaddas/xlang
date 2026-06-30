@@ -15,8 +15,8 @@ fn cmp3(a: String, b: String, numeric: bool): i32 {
             }
             return 1
         }
-        # numeric tie → fall through to full-line comparison (GNU's last-resort
-        # tiebreak; GNU sort is not stable unless -s is given).
+        // numeric tie: fall through to full-line comparison (GNU last-resort
+        // tiebreak; GNU sort is not stable unless -s is given).
     }
     let c: i32 = str_cmp(a, b)
     if c < 0 {
