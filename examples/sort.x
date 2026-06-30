@@ -2,9 +2,8 @@ module main
 
 // sort [-r] [-n] [file] — sort lines lexicographically (default), numeric (-n),
 // and/or reverse (-r). GNU-compatible flags.
-// Three-way (Dutch-flag) quicksort with random pivot: handles runs of equal
-// elements in O(n) (avoids O(n²) on sorted input AND stack overflow on
-// all-equal input like non-numeric text under -n).
+// Bottom-up merge sort: O(n log n) guaranteed, STABLE (matches GNU — equal keys
+// keep input order), and iterative (no recursion → no stack overflow).
 
 fn cmp3(a: String, b: String, numeric: bool): i32 {
     if numeric {
@@ -28,39 +27,64 @@ fn cmp3(a: String, b: String, numeric: bool): i32 {
     return 0
 }
 
-fn quicksort(lines: Vec<String>, lo: i32, hi: i32, reverse: bool, numeric: bool): i32 {
-    if lo >= hi {
-        return 0
-    }
-    let pidx: i32 = lo + random_int(hi - lo + 1)
-    let pivot: String = lines[pidx]
-    let mut lt: i32 = lo
-    let mut gt: i32 = hi
-    let mut i: i32 = lo
-    while i <= gt {
-        let mut c: i32 = cmp3(lines[i], pivot, numeric)
-        if reverse {
-            c = 0 - c
-        }
-        if c < 0 {
-            let t: String = lines[lt]
-            lines[lt] = lines[i]
-            lines[i] = t
-            lt = lt + 1
-            i = i + 1
-        } else {
-            if c > 0 {
-                let t: String = lines[i]
-                lines[i] = lines[gt]
-                lines[gt] = t
-                gt = gt - 1
-            } else {
-                i = i + 1
+fn merge_sort(lines: Vec<String>, tmp: Vec<String>, count: i32, reverse: bool, numeric: bool): i32 {
+    let mut width: i32 = 1
+    while width < count {
+        let mut i: i32 = 0
+        while i < count {
+            let lo: i32 = i
+            let mut mid: i32 = i + width
+            if mid > count {
+                mid = count
             }
+            let mut hi: i32 = i + 2 * width
+            if hi > count {
+                hi = count
+            }
+            let mut a: i32 = lo
+            let mut b: i32 = mid
+            let mut t: i32 = lo
+            while a < mid {
+                if b < hi {
+                    let c: i32 = cmp3(lines[a], lines[b], numeric)
+                    let mut take_a: bool = false
+                    if reverse {
+                        if c >= 0 {
+                            take_a = true
+                        }
+                    } else {
+                        if c <= 0 {
+                            take_a = true
+                        }
+                    }
+                    if take_a {
+                        tmp[t] = lines[a]
+                        a = a + 1
+                    } else {
+                        tmp[t] = lines[b]
+                        b = b + 1
+                    }
+                    t = t + 1
+                } else {
+                    tmp[t] = lines[a]
+                    a = a + 1
+                    t = t + 1
+                }
+            }
+            while b < hi {
+                tmp[t] = lines[b]
+                b = b + 1
+                t = t + 1
+            }
+            i = i + 2 * width
         }
+        let mut c2: i32 = 0
+        while c2 < count {
+            lines[c2] = tmp[c2]
+            c2 = c2 + 1
+        }
+        width = width * 2
     }
-    quicksort(lines, lo, lt - 1, reverse, numeric)
-    quicksort(lines, gt + 1, hi, reverse, numeric)
     return 0
 }
 
@@ -111,8 +135,13 @@ fn main(): i32 {
     }
     let count: i32 = vec_len(lines)
     if count > 0 {
-        random_seed()
-        quicksort(lines, 0, count - 1, reverse, numeric)
+        let tmp: Vec<String> = vec_new()
+        let mut z: i32 = 0
+        while z < count {
+            tmp.push("")
+            z = z + 1
+        }
+        merge_sort(lines, tmp, count, reverse, numeric)
     }
     let mut j: i32 = 0
     while j < count {
