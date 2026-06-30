@@ -4,7 +4,7 @@ module main
 // Prints: uid=PID(whoami) gid=PID(whoami)
 
 fn main(): i32 {
-    let user: String = whoami()
+    let user: String = getenv("USER")
     let pid: i32 = getpid()
     print_raw("uid=")
     print_raw(int_to_str(pid))
