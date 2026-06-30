@@ -56,7 +56,7 @@ fn main(): i32 {
                 j += 1
             }
             if !in_set {
-                sb_push(str_slice(s, i, i + 1))
+                sb_push_char(c)
             }
             i += 1
         }

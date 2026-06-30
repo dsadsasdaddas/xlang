@@ -24,17 +24,17 @@ fn main(): i32 {
         let idx1: i32 = ((b0 & 3) << 4) | (b1 >> 4)
         let idx2: i32 = ((b1 & 15) << 2) | (b2 >> 6)
         let idx3: i32 = b2 & 63
-        sb_push(str_slice(table, idx0, idx0 + 1))
-        sb_push(str_slice(table, idx1, idx1 + 1))
+        sb_push_char(str_char_at(table, idx0))
+        sb_push_char(str_char_at(table, idx1))
         if have1 {
-            sb_push(str_slice(table, idx2, idx2 + 1))
+            sb_push_char(str_char_at(table, idx2))
         } else {
-            sb_push("=")
+            sb_push_char(61)
         }
         if have2 {
-            sb_push(str_slice(table, idx3, idx3 + 1))
+            sb_push_char(str_char_at(table, idx3))
         } else {
-            sb_push("=")
+            sb_push_char(61)
         }
         i += 3
     }
