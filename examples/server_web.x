@@ -48,23 +48,22 @@ fn parse_path(req: String): String {
 }
 
 fn serve(fd: i32, full: String, path: String): i32 {
-    if file_exists(full) {
-        let size: i32 = file_size(full)
-        let mime: String = mime_of(path)
-        sb_new()
-        sb_push("HTTP/1.1 200 OK\r\n")
-        sb_push("Content-Type: ")
-        sb_push(mime)
-        sb_push("\r\nContent-Length: ")
-        sb_push(int_to_str(size))
-        sb_push("\r\nConnection: keep-alive\r\n\r\n")
-        send_str(fd, sb_str())
-        let ffd: i32 = open_read(full)
-        sendfile_fd(fd, ffd, size)
-        close_fd(ffd)
-    } else {
+    let ffd: i32 = cache_open(full)
+    if ffd < 0 {
         send_str(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")
+        return 0
     }
+    let size: i32 = cache_size(full)
+    let mime: String = mime_of(path)
+    sb_new()
+    sb_push("HTTP/1.1 200 OK\r\n")
+    sb_push("Content-Type: ")
+    sb_push(mime)
+    sb_push("\r\nContent-Length: ")
+    sb_push(int_to_str(size))
+    sb_push("\r\nConnection: keep-alive\r\n\r\n")
+    send_str(fd, sb_str())
+    sendfile_fd(fd, ffd, size)
     return 0
 }
 
