@@ -19,6 +19,11 @@ fn less(a: String, b: String, numeric: bool): i32 {
 
 fn quicksort(lines: Vec<String>, lo: i32, hi: i32, reverse: bool, numeric: bool): i32 {
     if lo < hi {
+        let span: i32 = hi - lo + 1
+        let pidx: i32 = lo + random_int(span)
+        let ptmp: String = lines[pidx]
+        lines[pidx] = lines[hi]
+        lines[hi] = ptmp
         let pivot: String = lines[hi]
         let mut i: i32 = lo - 1
         let mut j: i32 = lo
@@ -94,6 +99,7 @@ fn main(): i32 {
     }
     let count: i32 = vec_len(lines)
     if count > 0 {
+        random_seed()
         quicksort(lines, 0, count - 1, reverse, numeric)
     }
     let mut j: i32 = 0
