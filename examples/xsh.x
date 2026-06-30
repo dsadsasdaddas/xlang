@@ -1,11 +1,76 @@
 module main
 
-// xsh — a shell: N-stage pipelines, redirects (<, >, >>), builtins (pwd/cd/exit).
-//   a | b | c          N-stage pipeline (up to 17 stages via a pipe pool)
-//   cmd < in > out     input/output redirect; >> appends
-//   pwd / cd DIR / exit  builtins
-// Stages split on " | " (space-pipe-space). Reads one command per line from stdin:
-//   printf "seq 1 10 | head -5 | tail -2\n" | ./xsh
+// xsh — a shell: N-stage pipelines, redirects (<, >, >>), variable expansion
+// ($VAR), export/assignment (NAME=VALUE), builtins (pwd/cd/echo/exit), and ';'.
+//   a | b | c | d      N-stage pipeline   cmd > f / < f / >> f   redirects
+//   echo $HOME         env-var expansion  export X=v / X=v        set shell var
+//   cmd1 ; cmd2        sequence
+// Uses exec_split (PATH-based) so PATH=xlang-bin runs a pure xlang userland.
+
+fn is_name_start(c: i32): bool {
+    if c >= 65 { if c <= 90 { return true } }
+    if c >= 97 { if c <= 122 { return true } }
+    if c == 95 { return true }
+    return false
+}
+
+fn is_name_char(c: i32): bool {
+    if is_name_start(c) { return true }
+    if c >= 48 { if c <= 57 { return true } }
+    return false
+}
+
+fn expand_vars(s: String): String {
+    let n: i32 = str_len(s)
+    sb_new()
+    let mut i: i32 = 0
+    while i < n {
+        let c: i32 = str_char_at(s, i)
+        if c == 36 {
+            let j: i32 = i + 1
+            if j < n {
+                if is_name_start(str_char_at(s, j)) {
+                    let mut k: i32 = j + 1
+                    while k < n {
+                        if is_name_char(str_char_at(s, k)) {
+                            k = k + 1
+                        } else {
+                            break
+                        }
+                    }
+                    sb_push(getenv(str_slice(s, j, k)))
+                    i = k
+                } else {
+                    sb_push_char(36)
+                    i = i + 1
+                }
+            } else {
+                sb_push_char(36)
+                i = i + 1
+            }
+        } else {
+            sb_push_char(c)
+            i = i + 1
+        }
+    }
+    return sb_str()
+}
+
+fn split_char(s: String, sep: i32): Vec<String> {
+    let v: Vec<String> = vec_new()
+    let n: i32 = str_len(s)
+    let mut start: i32 = 0
+    let mut i: i32 = 0
+    while i < n {
+        if str_char_at(s, i) == sep {
+            v.push(str_slice(s, start, i))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    v.push(str_slice(s, start, n))
+    return v
+}
 
 fn split_pipe(s: String): Vec<String> {
     let v: Vec<String> = vec_new()
@@ -66,7 +131,7 @@ fn run_pipeline(stages: Vec<String>): i32 {
                 dup2(pipe_w_at(k), 1)
             }
             close_all_pipes(npipes)
-            exec_sh(stages[k])
+            exec_split(stages[k])
             return 1
         }
         k = k + 1
@@ -119,10 +184,97 @@ fn run_one(cmd: String): i32 {
             dup2(fdo, 1)
             close_fd(fdo)
         }
-        exec_sh(core)
+        exec_split(core)
         return 1
     }
     wait_child()
+    return 0
+}
+
+fn trim(s: String): String {
+    let n: i32 = str_len(s)
+    let mut start: i32 = 0
+    while start < n {
+        if str_char_at(s, start) == 32 {
+            start = start + 1
+        } else {
+            break
+        }
+    }
+    let mut end: i32 = n
+    while end > start {
+        if str_char_at(s, end - 1) == 32 {
+            end = end - 1
+        } else {
+            break
+        }
+    }
+    return str_slice(s, start, end)
+}
+
+fn run_command(cmd: String): i32 {
+    let c: String = trim(expand_vars(cmd))
+    if str_len(c) == 0 {
+        return 0
+    }
+    // Pipes / redirects take precedence over builtins, so `echo x | grep` pipes
+    // and `echo x > f` redirects (rather than hitting the echo builtin).
+    let stages: Vec<String> = split_pipe(c)
+    if vec_len(stages) > 1 {
+        run_pipeline(stages)
+        return 0
+    }
+    if str_find(c, " > ") >= 0 {
+        run_one(c)
+        return 0
+    }
+    if str_find(c, " >> ") >= 0 {
+        run_one(c)
+        return 0
+    }
+    if str_find(c, " < ") >= 0 {
+        run_one(c)
+        return 0
+    }
+    // Builtins (standalone commands only).
+    if str_eq(c, "pwd") {
+        print_raw(getcwd())
+        print_raw("\n")
+        return 0
+    }
+    if str_eq(c, "exit") {
+        return -1
+    }
+    if str_find(c, "cd ") == 0 {
+        chdir(str_slice(c, 3, str_len(c)))
+        return 0
+    }
+    if str_find(c, "echo ") == 0 {
+        print_raw(str_slice(c, 5, str_len(c)))
+        print_raw("\n")
+        return 0
+    }
+    if str_eq(c, "echo") {
+        print_raw("\n")
+        return 0
+    }
+    if str_find(c, "export ") == 0 {
+        let body: String = str_slice(c, 7, str_len(c))
+        let eq: i32 = str_find(body, "=")
+        if eq > 0 {
+            setenv(str_slice(body, 0, eq), str_slice(body, eq + 1, str_len(body)))
+        }
+        return 0
+    }
+    let eq0: i32 = str_find(c, "=")
+    if eq0 > 0 {
+        let sp: i32 = str_find(c, " ")
+        if sp < 0 {
+            setenv(str_slice(c, 0, eq0), str_slice(c, eq0 + 1, str_len(c)))
+            return 0
+        }
+    }
+    run_one(c)
     return 0
 }
 
@@ -132,22 +284,18 @@ fn main(): i32 {
         if str_len(cmd) == 0 {
             return 0
         }
-        if str_eq(cmd, "exit") {
-            return 0
-        }
-        if str_eq(cmd, "pwd") {
-            print_raw(getcwd())
-            print_raw("\n")
-        } else {
-            if str_find(cmd, "cd ") == 0 {
-                chdir(str_slice(cmd, 3, str_len(cmd)))
-            } else {
-                let stages: Vec<String> = split_pipe(cmd)
-                if vec_len(stages) > 1 {
-                    run_pipeline(stages)
-                } else {
-                    run_one(cmd)
-                }
+        // Split raw line on ';'. Variable expansion is per-command (deferred to
+        // run_command), so `X=hi; echo $X` sees X set before $X expands.
+        let cmds: Vec<String> = split_char(cmd, 59)
+        let mut c: i32 = 0
+        let mut stop: bool = false
+        while c < vec_len(cmds) {
+            if run_command(cmds[c]) < 0 {
+                stop = true
+            }
+            c = c + 1
+            if stop {
+                return 0
             }
         }
     }

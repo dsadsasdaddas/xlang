@@ -1144,6 +1144,9 @@ impl CGen {
             "    pid_t p = wait(&st);",
             "    return (int32_t)p;",
             "}",
+            "int32_t __xlang_setenv(const char* name, const char* value) {",
+            "    return setenv(name, value, 1) == 0 ? 0 : -1;",
+            "}",
             "// File fd cache: hot files keep their fd open + size known, so a request",
             "// skips open/fstat/close (what nginx does). Simple linear map, cap 512.",
             "#define __XLANG_FC_N 512",
@@ -1364,6 +1367,13 @@ impl CGen {
             "sb_push" => format!("__xlang_sb_push({a})"),
             "sb_push_char" => format!("__xlang_sb_push_char({a})"),
             "getenv" => format!("(getenv({a}) ? getenv({a}) : \"\")"),
+            "setenv" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_setenv({a}, {b})")
+            }
             "readlink" => format!("__xlang_readlink({a})"),
             "realpath" => format!("__xlang_realpath({a})"),
             "env_entry" => format!("__xlang_env_entry({a})"),
