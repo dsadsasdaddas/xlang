@@ -97,9 +97,36 @@ pub fn run_cli() -> XResult<()> {
             Ok(())
         }
         "run" => {
-            let (source, output) = parse_source_o(&args, "xlangc run <file> [-o output]")?;
+            // xlangc run <file> [program args...] [-o output]
+            // Trailing args after the source are forwarded to the program as argv,
+            // so coreutils can be exercised (e.g. `run echo.x hello world`).
+            if args.is_empty() {
+                return Err(XError::Parse(
+                    "usage: xlangc run <file> [args...] [-o output]".into(),
+                ));
+            }
+            let source = args[0].clone();
+            let mut output = None;
+            let mut prog_args: Vec<String> = Vec::new();
+            let mut i = 1;
+            while i < args.len() {
+                if args[i] == "-o" || args[i] == "--output" {
+                    if i + 1 >= args.len() {
+                        return Err(XError::Parse(
+                            "usage: xlangc run <file> [args...] [-o output]".into(),
+                        ));
+                    }
+                    output = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    prog_args.push(args[i].clone());
+                    i += 1;
+                }
+            }
             let exe = build_exe(Path::new(&source), output.map(PathBuf::from))?;
-            let out = Command::new(fs::canonicalize(exe)?).output()?;
+            let out = Command::new(fs::canonicalize(exe)?)
+                .args(&prog_args)
+                .output()?;
             print!("{}", String::from_utf8_lossy(&out.stdout));
             eprint!("{}", String::from_utf8_lossy(&out.stderr));
             println!(
