@@ -1,0 +1,49 @@
+{
+  "name": "xlang",
+  "displayName": "X Language",
+  "description": "Language support for xlang (.x): live diagnostics, hover, go-to-definition, completion, and syntax highlighting. Talks LSP to the xlang-lsp server.",
+  "version": "0.1.0",
+  "publisher": "xlang",
+  "license": "MIT",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:xlang"],
+  "main": "./src/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "xlang",
+        "aliases": ["X Language", "xlang"],
+        "extensions": [".x"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "xlang",
+        "scopeName": "source.xlang",
+        "path": "./syntaxes/xlang.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "X Language",
+      "properties": {
+        "xlang.serverPath": {
+          "type": "string",
+          "default": "xlang-lsp",
+          "description": "Path to the xlang-lsp language-server binary (built from the xlang compiler: `cargo build --release`). Defaults to looking up `xlang-lsp` on PATH."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}

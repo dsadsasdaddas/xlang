@@ -1,0 +1,47 @@
+{
+  "scopeName": "source.xlang",
+  "patterns": [{ "include": "#main" }],
+  "repository": {
+    "main": {
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#string" },
+        { "include": "#keyword" },
+        { "include": "#type" },
+        { "include": "#number" },
+        { "include": "#fn-name" }
+      ]
+    },
+    "comment": {
+      "name": "comment.line.xlang",
+      "match": "//.*$"
+    },
+    "string": {
+      "name": "string.quoted.double.xlang",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.xlang",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "keyword": {
+      "name": "keyword.control.xlang",
+      "match": "\\b(fn|let|mut|if|else|while|for|in|return|struct|module|match|break|continue|true|false|print|print_raw|print_str|print_i32)\\b"
+    },
+    "type": {
+      "name": "support.type.xlang",
+      "match": "\\b(i32|i64|f32|f64|bool|String|Vec|Array|Slice|Option|Result)\\b"
+    },
+    "number": {
+      "name": "constant.numeric.xlang",
+      "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+    },
+    "fn-name": {
+      "name": "entity.name.function.xlang",
+      "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(?=\\()"
+    }
+  }
+}
