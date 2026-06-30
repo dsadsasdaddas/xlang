@@ -871,6 +871,11 @@ impl CGen {
             "    snprintf(buf, 16, \"%d\", n);",
             "    return buf;",
             "}",
+            "char* __xlang_pad_int(int32_t n, int32_t width) {",
+            "    char* buf = (char*)malloc(32);",
+            "    snprintf(buf, 32, \"%*d\", width, n);",
+            "    return buf;",
+            "}",
             "char* __xlang_read_stdin() {",
             "    size_t cap = 65536, len = 0;",
             "    char* buf = (char*)malloc(cap);",
@@ -1218,6 +1223,13 @@ impl CGen {
             "argv" => format!("__xlang_argv_g[{a}]"),
             "print_raw" => format!("printf(\"%s\", {a})"),
             "int_to_str" => format!("__xlang_int_to_str({a})"),
+            "pad_int" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_pad_int({a}, {b})")
+            }
             "str_concat" => {
                 let Some(second) = args.get(1) else {
                     return Ok(None);
