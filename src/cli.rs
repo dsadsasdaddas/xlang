@@ -8,6 +8,7 @@ use crate::driver::{
     parse_file, run_safe, write_c,
 };
 use crate::error::{XError, XResult};
+use crate::symbols;
 
 pub fn run_cli() -> XResult<()> {
     let mut args: Vec<String> = env::args().skip(1).collect();
@@ -84,6 +85,16 @@ pub fn run_cli() -> XResult<()> {
             println!("{}", serde_json::to_string_pretty(&program)?);
             Ok(())
         }
+        "symbols" => {
+            // Emit a symbol index (functions/structs + source ranges) as JSON —
+            // the data source for future LSP hover / goto-definition.
+            let source = one_source_arg(&args, "xlangc symbols <file>")?;
+            let src = fs::read_to_string(source)?;
+            let program = parse_file(Path::new(source))?;
+            let index = symbols::build_index(&program.items, &src);
+            println!("{}", serde_json::to_string_pretty(&index)?);
+            Ok(())
+        }
         "c" => {
             let (source, output) = parse_source_o(&args, "xlangc c <file> [-o output.c]")?;
             let path = write_c(Path::new(&source), output.map(PathBuf::from))?;
@@ -156,6 +167,7 @@ fn print_help() {
          Commands:\n\
            xlangc check <files...> [--format json]  Check and report diagnostics\n\
            xlangc ast <file>              Print JSON AST\n\
+           xlangc symbols <file>          Print JSON symbol index (for LSP)\n\
            xlangc c <file> [-o out.c]     Generate C for supported subset\n\
            xlangc build <file> [-o out]   Build native executable\n\
            xlangc run <file> [-o out]     Build and run\n\
