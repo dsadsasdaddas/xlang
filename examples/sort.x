@@ -9,13 +9,14 @@ fn cmp3(a: String, b: String, numeric: bool): i32 {
     if numeric {
         let va: i32 = str_to_int(a)
         let vb: i32 = str_to_int(b)
-        if va < vb {
-            return -1
-        }
-        if va > vb {
+        if va != vb {
+            if va < vb {
+                return -1
+            }
             return 1
         }
-        return 0
+        # numeric tie → fall through to full-line comparison (GNU's last-resort
+        # tiebreak; GNU sort is not stable unless -s is given).
     }
     let c: i32 = str_cmp(a, b)
     if c < 0 {
