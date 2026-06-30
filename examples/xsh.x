@@ -253,11 +253,12 @@ fn run_pipeline(stages: Vec<String>): i32 {
     }
     close_all_pipes(npipes)
     let mut w: i32 = 0
+    let mut code: i32 = 0
     while w < ns {
-        wait_child()
+        code = wait_status()
         w = w + 1
     }
-    return 0
+    return code
 }
 
 fn run_one(cmd: String): i32 {
@@ -302,8 +303,8 @@ fn run_one(cmd: String): i32 {
         exec_split(core)
         return 1
     }
-    wait_child()
-    return 0
+    let code: i32 = wait_status()
+    return code
 }
 
 fn trim(s: String): String {
@@ -372,12 +373,63 @@ fn run_for(c: String): i32 {
     return 0
 }
 
+// if COND; then BODY; fi  (single-line). Runs BODY iff COND exits 0.
+fn run_if(c: String): i32 {
+    let then_pos: i32 = str_find(c, " then ")
+    if then_pos < 0 {
+        return 1
+    }
+    let cond: String = strip_trailing_semi(str_slice(c, 3, then_pos))
+    let body_full: String = str_slice(c, then_pos + 6, str_len(c))
+    let fi_pos: i32 = str_find(body_full, "fi")
+    if fi_pos < 0 {
+        return 1
+    }
+    let body: String = strip_trailing_semi(str_slice(body_full, 0, fi_pos))
+    if run_command(cond) == 0 {
+        run_command(body)
+    }
+    return 0
+}
+
+// while COND; do BODY; done  (single-line). Runs BODY while COND exits 0.
+fn run_while(c: String): i32 {
+    let do_pos: i32 = str_find(c, " do ")
+    if do_pos < 0 {
+        return 1
+    }
+    let cond: String = strip_trailing_semi(str_slice(c, 6, do_pos))
+    let body_full: String = str_slice(c, do_pos + 4, str_len(c))
+    let done_pos: i32 = str_find(body_full, "done")
+    if done_pos < 0 {
+        return 1
+    }
+    let body: String = strip_trailing_semi(str_slice(body_full, 0, done_pos))
+    while true {
+        if run_command(cond) != 0 {
+            break
+        }
+        run_command(body)
+    }
+    return 0
+}
+
 fn run_command(cmd: String): i32 {
-    // for-loop must be handled on the RAW line (before $VAR expansion), so the
-    // body's $VAR is re-expanded each iteration with the loop variable set.
+    // Control-flow constructs are handled on the RAW line (before $VAR
+    // expansion), so their bodies re-expand per execution.
     if str_find(cmd, "for ") == 0 {
         if str_find(cmd, " do ") >= 0 {
             return run_for(cmd)
+        }
+    }
+    if str_find(cmd, "if ") == 0 {
+        if str_find(cmd, " then ") >= 0 {
+            return run_if(cmd)
+        }
+    }
+    if str_find(cmd, "while ") == 0 {
+        if str_find(cmd, " do ") >= 0 {
+            return run_while(cmd)
         }
     }
     let c: String = trim(expand(cmd))
@@ -388,20 +440,16 @@ fn run_command(cmd: String): i32 {
     // and `echo x > f` redirects (rather than hitting the echo builtin).
     let stages: Vec<String> = split_pipe(c)
     if vec_len(stages) > 1 {
-        run_pipeline(stages)
-        return 0
+        return run_pipeline(stages)
     }
     if str_find(c, " > ") >= 0 {
-        run_one(c)
-        return 0
+        return run_one(c)
     }
     if str_find(c, " >> ") >= 0 {
-        run_one(c)
-        return 0
+        return run_one(c)
     }
     if str_find(c, " < ") >= 0 {
-        run_one(c)
-        return 0
+        return run_one(c)
     }
     // Builtins (standalone commands only).
     if str_eq(c, "pwd") {
@@ -415,6 +463,12 @@ fn run_command(cmd: String): i32 {
     if str_find(c, "cd ") == 0 {
         chdir(str_slice(c, 3, str_len(c)))
         return 0
+    }
+    if str_eq(c, "true") {
+        return 0
+    }
+    if str_eq(c, "false") {
+        return 1
     }
     if str_find(c, "echo ") == 0 {
         print_raw(str_slice(c, 5, str_len(c)))
@@ -441,8 +495,7 @@ fn run_command(cmd: String): i32 {
             return 0
         }
     }
-    run_one(c)
-    return 0
+    return run_one(c)
 }
 
 fn main(): i32 {
@@ -451,11 +504,23 @@ fn main(): i32 {
         if str_len(cmd) == 0 {
             return 0
         }
-        // A for-loop line contains ';' as syntax (for ...; do ...; done), so it
-        // must bypass the ';' command-split and go straight to run_for.
+        // Control-flow lines contain ';' as syntax (for/if/while ...; do/then
+        // ...; done/fi), so they bypass the ';' command-split.
         if str_find(cmd, "for ") == 0 {
             if str_find(cmd, " do ") >= 0 {
                 run_for(cmd)
+                continue
+            }
+        }
+        if str_find(cmd, "if ") == 0 {
+            if str_find(cmd, " then ") >= 0 {
+                run_if(cmd)
+                continue
+            }
+        }
+        if str_find(cmd, "while ") == 0 {
+            if str_find(cmd, " do ") >= 0 {
+                run_while(cmd)
                 continue
             }
         }
