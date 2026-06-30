@@ -69,7 +69,7 @@ jobs:
       - name: Run grades showcase (struct records + array processing)
         run: make run-grades
 
-      - name: Run Vec demo (dynamic array: push + iterate)
+      - name: "Run Vec demo (dynamic array: push + iterate)"
         run: make run-vec-demo
 
       - name: Run file I/O demo (write + read back)

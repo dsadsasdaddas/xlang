@@ -39,18 +39,20 @@ impl CGen {
         self.emit_runtime_preamble();
         self.emit_networking_preamble();
 
-        for typedef in self.collect_runtime_typedefs(program)? {
-            self.emit(&typedef);
-        }
-        if !self.lines.last().is_some_and(|line| line.is_empty()) {
-            self.emit("");
-        }
-
+        // User struct definitions first, so wrapper typedefs (Array/Vec/...)
+        // that reference them (e.g. Array<Student, 3>) see a complete type.
         for item in &program.items {
             if let Item::StructDecl { .. } = &item.node {
                 self.gen_struct(&item.node)?;
                 self.emit("");
             }
+        }
+
+        for typedef in self.collect_runtime_typedefs(program)? {
+            self.emit(&typedef);
+        }
+        if !self.lines.last().is_some_and(|line| line.is_empty()) {
+            self.emit("");
         }
 
         // Forward declarations so functions can reference each other in any
@@ -106,7 +108,38 @@ impl CGen {
                 }
             }
         }
-        Ok(typedefs.into_values().collect())
+        // Emit wrapper typedefs in dependency order (fixpoint): a wrapper whose
+        // definition references another not-yet-emitted wrapper must wait. This
+        // fixes nested wrappers (e.g. Array<Array<i32>, 3> needs Array_i32 first)
+        // which BTreeMap's alphabetical order would emit backwards.
+        let mut pending = typedefs;
+        let mut ordered: Vec<String> = Vec::new();
+        let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while !pending.is_empty() {
+            let names: Vec<String> = pending.keys().cloned().collect();
+            let mut progressed = false;
+            for name in &names {
+                let Some(def) = pending.get(name) else {
+                    continue;
+                };
+                let blocked = pending.keys().any(|other| {
+                    other != name && def.contains(other) && !emitted.contains(other)
+                });
+                if !blocked {
+                    ordered.push(def.clone());
+                    emitted.insert(name.clone());
+                    pending.remove(name);
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        for def in pending.into_values() {
+            ordered.push(def);
+        }
+        Ok(ordered)
     }
 
     fn collect_block_typedefs(
