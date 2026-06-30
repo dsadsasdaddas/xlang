@@ -1141,13 +1141,7 @@ impl CGen {
                 format!("kill(({a}), ({b}))")
             }
             "random_int" => format!("(int32_t)(rand() % ({a}))"),
-            "sb_push" => {
-                let Some(second) = args.get(1) else {
-                    return Ok(None);
-                };
-                let b = self.gen_expr(second)?;
-                format!("__xlang_sb_push({b})")
-            }
+            "sb_push" => format!("__xlang_sb_push({a})"),
             "getenv" => format!("(getenv({a}) ? getenv({a}) : \"\")"),
             "readlink" => format!("__xlang_readlink({a})"),
             "realpath" => format!("__xlang_realpath({a})"),
