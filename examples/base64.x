@@ -1,13 +1,13 @@
 module main
 
-// base64 — encode stdin to base64 (like GNU base64). Uses bitwise ops to
-// split each 3-byte group into four 6-bit indices, looked up in the alphabet.
+// base64 — encode stdin to base64 (like GNU base64). Uses sb_push for O(n)
+// string building (avoids the O(n²) str_concat trap).
 fn main(): i32 {
     let s: String = read_stdin()
     let n: i32 = str_len(s)
     let table: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
     let mut i: i32 = 0
-    let mut out: String = ""
+    sb_new()
     while i < n {
         let b0: i32 = str_char_at(s, i)
         let mut b1: i32 = 0
@@ -24,21 +24,21 @@ fn main(): i32 {
         let idx1: i32 = ((b0 & 3) << 4) | (b1 >> 4)
         let idx2: i32 = ((b1 & 15) << 2) | (b2 >> 6)
         let idx3: i32 = b2 & 63
-        out = str_concat(out, str_slice(table, idx0, idx0 + 1))
-        out = str_concat(out, str_slice(table, idx1, idx1 + 1))
+        sb_push(str_slice(table, idx0, idx0 + 1))
+        sb_push(str_slice(table, idx1, idx1 + 1))
         if have1 {
-            out = str_concat(out, str_slice(table, idx2, idx2 + 1))
+            sb_push(str_slice(table, idx2, idx2 + 1))
         } else {
-            out = str_concat(out, "=")
+            sb_push("=")
         }
         if have2 {
-            out = str_concat(out, str_slice(table, idx3, idx3 + 1))
+            sb_push(str_slice(table, idx3, idx3 + 1))
         } else {
-            out = str_concat(out, "=")
+            sb_push("=")
         }
         i += 3
     }
-    print_raw(out)
+    print_raw(sb_str())
     print_raw("\n")
     return 0
 }

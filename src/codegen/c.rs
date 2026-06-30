@@ -906,6 +906,26 @@ impl CGen {
             "    if (n > 0 && buf[n - 1] == '\\n') buf[n - 1] = 0;",
             "    return buf;",
             "}",
+            "static char* __sb_buf = 0;",
+            "static size_t __sb_len = 0;",
+            "static size_t __sb_cap = 0;",
+            "void __xlang_sb_new() {",
+            "    if (!__sb_buf) { __sb_buf = (char*)malloc(65536); __sb_cap = 65536; }",
+            "    __sb_len = 0; __sb_buf[0] = 0;",
+            "}",
+            "void __xlang_sb_push(const char* s) {",
+            "    size_t sl = strlen(s);",
+            "    if (__sb_len + sl + 1 > __sb_cap) {",
+            "        while (__sb_len + sl + 1 > __sb_cap) __sb_cap *= 2;",
+            "        __sb_buf = (char*)realloc(__sb_buf, __sb_cap);",
+            "    }",
+            "    memcpy(__sb_buf + __sb_len, s, sl);",
+            "    __sb_len += sl;",
+            "    __sb_buf[__sb_len] = 0;",
+            "}",
+            "const char* __xlang_sb_str() {",
+            "    return __sb_buf ? __sb_buf : \"\";",
+            "}",
             "char* __xlang_time_str() {",
             "    setlocale(LC_TIME, \"\");",
             "    time_t t = time(NULL);",
@@ -1121,6 +1141,13 @@ impl CGen {
                 format!("kill(({a}), ({b}))")
             }
             "random_int" => format!("(int32_t)(rand() % ({a}))"),
+            "sb_push" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_sb_push({b})")
+            }
             "getenv" => format!("(getenv({a}) ? getenv({a}) : \"\")"),
             "readlink" => format!("__xlang_readlink({a})"),
             "realpath" => format!("__xlang_realpath({a})"),
@@ -1255,6 +1282,8 @@ impl CGen {
             "argc" => "(__xlang_argc_g)".to_string(),
             "read_stdin" => "__xlang_read_stdin()".to_string(),
             "read_line" => "__xlang_read_line()".to_string(),
+            "sb_new" => "__xlang_sb_new()".to_string(),
+            "sb_str" => "__xlang_sb_str()".to_string(),
             "time_str" => "__xlang_time_str()".to_string(),
             "random_seed" => "srand((unsigned)time(NULL))".to_string(),
             "getcwd" => "__xlang_getcwd()".to_string(),

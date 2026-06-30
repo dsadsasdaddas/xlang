@@ -1,8 +1,8 @@
 module main
 
 // tr [-d] <set1> [set2] [file] — translate or delete characters.
-// -d: delete all chars in set1 (like `tr -d SET`).
-// Without -d: translate set1 → set2 (like `tr SET1 SET2`).
+// -d: delete all chars in set1. Without -d: translate set1→set2.
+// Uses sb_push for O(n) output in delete mode.
 fn main(): i32 {
     let mut s: String = ""
     let mut delete_mode: bool = false
@@ -44,6 +44,7 @@ fn main(): i32 {
         let n: i32 = str_len(s)
         let sn: i32 = str_len(set1)
         let mut i: i32 = 0
+        sb_new()
         while i < n {
             let c: i32 = str_char_at(s, i)
             let mut in_set: bool = false
@@ -55,10 +56,11 @@ fn main(): i32 {
                 j += 1
             }
             if !in_set {
-                print_raw(str_slice(s, i, i + 1))
+                sb_push(str_slice(s, i, i + 1))
             }
             i += 1
         }
+        print_raw(sb_str())
     } else {
         print_raw(str_translate(s, set1, set2))
     }
