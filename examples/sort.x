@@ -1,54 +1,66 @@
 module main
 
 // sort [-r] [-n] [file] — sort lines lexicographically (default), numeric (-n),
-// and/or reverse (-r). GNU-compatible flags. Quicksort O(n log n).
-fn less(a: String, b: String, numeric: bool): i32 {
+// and/or reverse (-r). GNU-compatible flags.
+// Three-way (Dutch-flag) quicksort with random pivot: handles runs of equal
+// elements in O(n) (avoids O(n²) on sorted input AND stack overflow on
+// all-equal input like non-numeric text under -n).
+
+fn cmp3(a: String, b: String, numeric: bool): i32 {
     if numeric {
         let va: i32 = str_to_int(a)
         let vb: i32 = str_to_int(b)
         if va < vb {
+            return -1
+        }
+        if va > vb {
             return 1
         }
         return 0
     }
-    if str_cmp(a, b) < 0 {
+    let c: i32 = str_cmp(a, b)
+    if c < 0 {
+        return -1
+    }
+    if c > 0 {
         return 1
     }
     return 0
 }
 
 fn quicksort(lines: Vec<String>, lo: i32, hi: i32, reverse: bool, numeric: bool): i32 {
-    if lo < hi {
-        let span: i32 = hi - lo + 1
-        let pidx: i32 = lo + random_int(span)
-        let ptmp: String = lines[pidx]
-        lines[pidx] = lines[hi]
-        lines[hi] = ptmp
-        let pivot: String = lines[hi]
-        let mut i: i32 = lo - 1
-        let mut j: i32 = lo
-        while j < hi {
-            let mut should_swap: bool = false
-            if reverse {
-                should_swap = less(lines[j], pivot, numeric) == 0
-            } else {
-                should_swap = less(lines[j], pivot, numeric) == 1
-            }
-            if should_swap {
-                i = i + 1
-                let tmp: String = lines[i]
-                lines[i] = lines[j]
-                lines[j] = tmp
-            }
-            j = j + 1
-        }
-        i = i + 1
-        let tmp2: String = lines[i]
-        lines[i] = lines[hi]
-        lines[hi] = tmp2
-        quicksort(lines, lo, i - 1, reverse, numeric)
-        quicksort(lines, i + 1, hi, reverse, numeric)
+    if lo >= hi {
+        return 0
     }
+    let pidx: i32 = lo + random_int(hi - lo + 1)
+    let pivot: String = lines[pidx]
+    let mut lt: i32 = lo
+    let mut gt: i32 = hi
+    let mut i: i32 = lo
+    while i <= gt {
+        let mut c: i32 = cmp3(lines[i], pivot, numeric)
+        if reverse {
+            c = 0 - c
+        }
+        if c < 0 {
+            let t: String = lines[lt]
+            lines[lt] = lines[i]
+            lines[i] = t
+            lt = lt + 1
+            i = i + 1
+        } else {
+            if c > 0 {
+                let t: String = lines[i]
+                lines[i] = lines[gt]
+                lines[gt] = t
+                gt = gt - 1
+            } else {
+                i = i + 1
+            }
+        }
+    }
+    quicksort(lines, lo, lt - 1, reverse, numeric)
+    quicksort(lines, gt + 1, hi, reverse, numeric)
     return 0
 }
 

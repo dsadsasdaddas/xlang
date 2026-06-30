@@ -58,5 +58,8 @@ fn main(): i32 {
             matched += 1
         }
     }
-    return matched
+    if matched > 0 {
+        return 0
+    }
+    return 1
 }
