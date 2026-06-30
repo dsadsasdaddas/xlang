@@ -14,8 +14,13 @@ pub fn diagnostics(source: &str, file: &str) -> Vec<crate::driver::SerializableD
 }
 
 /// The symbol (function or struct) whose definition range contains `(line,col)`,
-/// returning its signature (hover) and its range (go-to-definition).
-pub fn symbol_at(source: &str, file: &str, line: u32, col: u32) -> Option<(String, Range)> {
+/// returning its signature (hover), its range (go-to-definition), and its doc.
+pub fn symbol_at(
+    source: &str,
+    file: &str,
+    line: u32,
+    col: u32,
+) -> Option<(String, Range, Option<String>)> {
     let (program, _diags) = parse_source(source, file);
     let program = program?;
     let index: SymbolIndex = symbols::build_index(&program.items, source);
@@ -29,6 +34,7 @@ pub fn symbol_at(source: &str, file: &str, line: u32, col: u32) -> Option<(Strin
                     f.return_type
                 ),
                 f.range.clone(),
+                f.doc.clone(),
             ));
         }
     }
@@ -37,20 +43,24 @@ pub fn symbol_at(source: &str, file: &str, line: u32, col: u32) -> Option<(Strin
             return Some((
                 format!("struct {} {{ {} }}", s.name, s.fields.join(", ")),
                 s.range.clone(),
+                s.doc.clone(),
             ));
         }
     }
     None
 }
 
-/// Hover text (signature) at a 1-based `(line, col)`.
+/// Hover text (signature + doc) at a 1-based `(line, col)`.
 pub fn hover(source: &str, file: &str, line: u32, col: u32) -> Option<String> {
-    symbol_at(source, file, line, col).map(|(sig, _)| sig)
+    symbol_at(source, file, line, col).map(|(sig, _, doc)| match doc {
+        Some(d) if !d.is_empty() => format!("{sig}\n\n{d}"),
+        _ => sig,
+    })
 }
 
 /// The defining range at a 1-based `(line, col)` — for go-to-definition.
 pub fn definition(source: &str, file: &str, line: u32, col: u32) -> Option<Range> {
-    symbol_at(source, file, line, col).map(|(_, range)| range)
+    symbol_at(source, file, line, col).map(|(_, range, _)| range)
 }
 
 /// Top-level names for completion (all functions + structs).
@@ -112,5 +122,24 @@ mod tests {
         let src = "module main\nfn main(): i32 {\n    let x: i32 = true\n    return x\n}\n";
         let ds = diagnostics(src, "<t>");
         assert!(!ds.is_empty(), "expected a type-mismatch diagnostic");
+    }
+}
+
+#[cfg(test)]
+mod doc_tests {
+    use super::*;
+    #[test]
+    fn hover_includes_doc_comment() {
+        let src = "module main\n/// Doubles x.\n/// Second line.\nfn double(x: i32): i32 {\n    return x * 2\n}\n";
+        let h = hover(src, "<t>", 4, 5).expect("hover present");
+        assert!(
+            h.contains("fn double(x: i32) -> i32"),
+            "hover should include signature: {h}"
+        );
+        assert!(h.contains("Doubles x."), "hover should include doc: {h}");
+        assert!(
+            h.contains("Second line."),
+            "hover should include multi-line doc: {h}"
+        );
     }
 }

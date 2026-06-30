@@ -26,6 +26,8 @@ pub struct FunctionSymbol {
     #[serde(rename = "returnType")]
     pub return_type: String,
     pub range: Range,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -33,6 +35,8 @@ pub struct StructSymbol {
     pub name: String,
     pub fields: Vec<String>,
     pub range: Range,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -57,6 +61,38 @@ pub fn type_to_str(ty: &TypeNode) -> String {
     }
 }
 
+/// Extract a `///` doc-comment block immediately preceding `item_start` (a byte
+/// offset). Source-level scan (no lexer/AST changes): walk backward over lines,
+/// skip blanks, collect consecutive `///` lines. Returns the joined doc text
+/// (the `///` prefix and one leading space stripped per line), or None.
+pub fn doc_before(source: &str, item_start: u32) -> Option<String> {
+    let before = &source[..(item_start as usize).min(source.len())];
+    let lines: Vec<&str> = before.lines().collect();
+    let mut i: i32 = lines.len() as i32 - 1;
+    while i >= 0 {
+        if lines[i as usize].trim().is_empty() {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    let mut doc_lines: Vec<String> = Vec::new();
+    while i >= 0 {
+        let l = lines[i as usize].trim_start();
+        if let Some(rest) = l.strip_prefix("///") {
+            doc_lines.push(rest.trim_start().to_string());
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    if doc_lines.is_empty() {
+        return None;
+    }
+    doc_lines.reverse();
+    Some(doc_lines.join("\n"))
+}
+
 fn range_of(span: &Span, lines: &LineIndex) -> Range {
     let (line, col) = lines.line_col(span.start);
     let (end_line, end_col) = lines.line_col(span.end);
@@ -75,6 +111,7 @@ pub fn build_index(items: &[Spanned<Item>], source: &str) -> SymbolIndex {
     let mut structs = Vec::new();
     for item in items {
         let range = range_of(&item.span, &lines);
+        let doc = doc_before(source, item.span.start);
         match &item.node {
             Item::FnDecl {
                 name,
@@ -91,6 +128,7 @@ pub fn build_index(items: &[Spanned<Item>], source: &str) -> SymbolIndex {
                     params: ps,
                     return_type: type_to_str(return_type),
                     range,
+                    doc,
                 });
             }
             Item::StructDecl { name, fields, .. } => {
@@ -102,6 +140,7 @@ pub fn build_index(items: &[Spanned<Item>], source: &str) -> SymbolIndex {
                     name: name.clone(),
                     fields: fs,
                     range,
+                    doc,
                 });
             }
             Item::TypeAliasDecl { .. } => {}
