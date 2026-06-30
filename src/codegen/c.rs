@@ -1072,6 +1072,34 @@ impl CGen {
             "int32_t __xlang_open_read(const char* path) {",
             "    return (int32_t)open(path, O_RDONLY);",
             "}",
+            "int32_t __xlang_open_write(const char* path) {",
+            "    return (int32_t)open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);",
+            "}",
+            "// Process control for the shell: pipe(2) ends in globals (one pipeline",
+            "// at a time — the shell waits on each line before reading the next).",
+            "static int32_t __xlang_pipe_r = -1;",
+            "static int32_t __xlang_pipe_w = -1;",
+            "int32_t __xlang_make_pipe() {",
+            "    int p[2];",
+            "    if (pipe(p) != 0) return -1;",
+            "    __xlang_pipe_r = p[0];",
+            "    __xlang_pipe_w = p[1];",
+            "    return 0;",
+            "}",
+            "int32_t __xlang_pipe_read_end() { return __xlang_pipe_r; }",
+            "int32_t __xlang_pipe_write_end() { return __xlang_pipe_w; }",
+            "int32_t __xlang_dup2(int32_t oldfd, int32_t newfd) {",
+            "    return dup2(oldfd, newfd) < 0 ? -1 : 0;",
+            "}",
+            "int32_t __xlang_exec_sh(const char* cmd) {",
+            "    execl(\"/bin/sh\", \"sh\", \"-c\", cmd, (char*)NULL);",
+            "    return -1;",
+            "}",
+            "int32_t __xlang_wait_child() {",
+            "    int st = 0;",
+            "    pid_t p = wait(&st);",
+            "    return (int32_t)p;",
+            "}",
             "// File fd cache: hot files keep their fd open + size known, so a request",
             "// skips open/fstat/close (what nginx does). Simple linear map, cap 512.",
             "#define __XLANG_FC_N 512",
@@ -1370,6 +1398,15 @@ impl CGen {
             "set_nonblock" => format!("__xlang_set_nonblock({a})"),
             "set_nodelay" => format!("__xlang_set_nodelay({a})"),
             "open_read" => format!("__xlang_open_read({a})"),
+            "open_write" => format!("__xlang_open_write({a})"),
+            "exec_sh" => format!("__xlang_exec_sh({a})"),
+            "dup2" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_dup2({a}, {b})")
+            }
             "cache_open" => format!("__xlang_cache_open({a})"),
             "cache_size" => format!("__xlang_cache_size({a})"),
             "sendfile_fd" => {
@@ -1446,6 +1483,10 @@ impl CGen {
         Ok(Some(match name.as_str() {
             "fork" => "fork()".to_string(),
             "getpid" => "getpid()".to_string(),
+            "make_pipe" => "__xlang_make_pipe()".to_string(),
+            "pipe_read_end" => "__xlang_pipe_read_end()".to_string(),
+            "pipe_write_end" => "__xlang_pipe_write_end()".to_string(),
+            "wait_child" => "__xlang_wait_child()".to_string(),
             "epoll_create" => "__xlang_epoll_create()".to_string(),
             "argc" => "(__xlang_argc_g)".to_string(),
             "read_stdin" => "__xlang_read_stdin()".to_string(),
