@@ -974,7 +974,7 @@ impl CGen {
             "    return (int32_t)fd;",
             "}",
             "char* __xlang_recv_str(int32_t fd) {",
-            "    char* buf = (char*)malloc(65536);",
+            "    static char buf[65536];",
             "    ssize_t n = recv(fd, buf, 65535, 0);",
             "    if (n < 0) n = 0;",
             "    buf[n] = 0;",
