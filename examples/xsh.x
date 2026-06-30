@@ -212,7 +212,58 @@ fn trim(s: String): String {
     return str_slice(s, start, end)
 }
 
+fn strip_trailing_semi(s: String): String {
+    let t: String = trim(s)
+    let n: i32 = str_len(t)
+    if n > 0 {
+        if str_char_at(t, n - 1) == 59 {
+            return str_slice(t, 0, n - 1)
+        }
+    }
+    return t
+}
+
+// for VAR in w1 w2 ...; do BODY; done  (single-line)
+fn run_for(c: String): i32 {
+    let do_pos: i32 = str_find(c, " do ")
+    if do_pos < 0 {
+        return 1
+    }
+    let varlist: String = str_slice(c, 4, do_pos)
+    let body_full: String = str_slice(c, do_pos + 4, str_len(c))
+    let done_pos: i32 = str_find(body_full, "done")
+    if done_pos < 0 {
+        return 1
+    }
+    let body: String = strip_trailing_semi(str_slice(body_full, 0, done_pos))
+    let in_pos: i32 = str_find(varlist, " in ")
+    if in_pos < 0 {
+        return 1
+    }
+    let var: String = str_slice(varlist, 0, in_pos)
+    let list_str: String = strip_trailing_semi(str_slice(varlist, in_pos + 4, str_len(varlist)))
+    let words: Vec<String> = split_char(list_str, 32)
+    let mut i: i32 = 0
+    let wc: i32 = vec_len(words)
+    while i < wc {
+        let w: String = trim(words[i])
+        if str_len(w) > 0 {
+            setenv(var, w)
+            run_command(body)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 fn run_command(cmd: String): i32 {
+    // for-loop must be handled on the RAW line (before $VAR expansion), so the
+    // body's $VAR is re-expanded each iteration with the loop variable set.
+    if str_find(cmd, "for ") == 0 {
+        if str_find(cmd, " do ") >= 0 {
+            return run_for(cmd)
+        }
+    }
     let c: String = trim(expand_vars(cmd))
     if str_len(c) == 0 {
         return 0
@@ -283,6 +334,14 @@ fn main(): i32 {
         let cmd: String = read_line()
         if str_len(cmd) == 0 {
             return 0
+        }
+        // A for-loop line contains ';' as syntax (for ...; do ...; done), so it
+        // must bypass the ';' command-split and go straight to run_for.
+        if str_find(cmd, "for ") == 0 {
+            if str_find(cmd, " do ") >= 0 {
+                run_for(cmd)
+                continue
+            }
         }
         // Split raw line on ';'. Variable expansion is per-command (deferred to
         // run_command), so `X=hi; echo $X` sees X set before $X expands.
