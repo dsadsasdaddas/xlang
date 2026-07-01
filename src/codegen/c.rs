@@ -1275,6 +1275,14 @@ impl CGen {
             "    strftime(s, 64, \"%a %b %e %H:%M:%S %Z %Y\", tm);",
             "    return s;",
             "}",
+            "// Monotonic seconds since an arbitrary epoch (CLOCK_MONOTONIC), as int32.",
+            "// Overflow-safe for ~68 years. Used for elapsed-time measurement (e.g. the",
+            "// load generator's per-worker duration timing) — NOT wall-clock time.",
+            "int32_t __xlang_now_s() {",
+            "    struct timespec ts;",
+            "    clock_gettime(CLOCK_MONOTONIC, &ts);",
+            "    return (int32_t)ts.tv_sec;",
+            "}",
             "",
         ];
         for line in lines {
@@ -2034,6 +2042,7 @@ impl CGen {
             "sb_str" => "__xlang_sb_str()".to_string(),
             "ignore_sigpipe" => "signal(SIGPIPE, SIG_IGN)".to_string(),
             "time_str" => "__xlang_time_str()".to_string(),
+            "now_s" => "__xlang_now_s()".to_string(),
             "random_seed" => "srand((unsigned)time(NULL))".to_string(),
             "getcwd" => "__xlang_getcwd()".to_string(),
             "env_count" => "__xlang_env_count()".to_string(),
