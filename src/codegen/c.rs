@@ -1508,6 +1508,20 @@ impl CGen {
             "    }",
             "    return (int32_t)((size_t)len - remaining);",
             "}",
+            "// Like sendfile_fd but starts at a given byte offset — used for HTTP 206",
+            "// Partial Content / Range requests. `off` is the starting offset; the",
+            "// kernel sendfile(2) advances its own offset pointer from there.",
+            "int32_t __xlang_sendfile_range(int32_t out_fd, int32_t in_fd, int32_t offset, int32_t len) {",
+            "    off_t off = (off_t)offset;",
+            "    size_t remaining = (size_t)len;",
+            "    while (remaining > 0) {",
+            "        ssize_t s = sendfile(out_fd, in_fd, &off, remaining);",
+            "        if (s > 0) { remaining -= (size_t)s; continue; }",
+            "        if (s < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { sched_yield(); continue; }",
+            "        break;",
+            "    }",
+            "    return (int32_t)((size_t)len - remaining);",
+            "}",
             "int32_t __xlang_dir_count(const char* path) {",
             "    DIR* d = opendir(path);",
             "    if (!d) return 0;",
@@ -1829,6 +1843,15 @@ impl CGen {
                 let b = self.gen_expr(second)?;
                 let c = self.gen_expr(third)?;
                 format!("__xlang_sendfile_fd({a}, {b}, {c})")
+            }
+            "sendfile_range" => {
+                if args.len() < 4 {
+                    return Ok(None);
+                }
+                let b = self.gen_expr(&args[1])?;
+                let c = self.gen_expr(&args[2])?;
+                let d = self.gen_expr(&args[3])?;
+                format!("__xlang_sendfile_range({a}, {b}, {c}, {d})")
             }
             "send_str" => {
                 let Some(second) = args.get(1) else {
