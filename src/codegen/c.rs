@@ -1186,6 +1186,37 @@ impl CGen {
             "    memcpy(out, s + a, len); out[len] = 0;",
             "    return out;",
             "}",
+            "int32_t __xlang_str_contains(const char* s, const char* sub) {",
+            "    return strstr(s, sub) != NULL ? 1 : 0;",
+            "}",
+            "int32_t __xlang_str_starts_with(const char* s, const char* prefix) {",
+            "    size_t pl = strlen(prefix);",
+            "    return strncmp(s, prefix, pl) == 0 ? 1 : 0;",
+            "}",
+            "int32_t __xlang_str_ends_with(const char* s, const char* suffix) {",
+            "    size_t sl = strlen(s), fl = strlen(suffix);",
+            "    if (fl > sl) return 0;",
+            "    return strcmp(s + sl - fl, suffix) == 0 ? 1 : 0;",
+            "}",
+            "char* __xlang_str_replace(const char* s, const char* from, const char* to) {",
+            "    size_t sl=strlen(s), fl=strlen(from), tl=strlen(to);",
+            "    if(fl==0){char*d=(char*)malloc(sl+1);strcpy(d,s);return d;}",
+            "    size_t count=0;",
+            "    const char* p=s;",
+            "    while((p=strstr(p,from))){count++;p+=fl;}",
+            "    size_t outlen=sl+count*(tl>fl?tl-fl:0)+1;",
+            "    char* out=(char*)malloc(outlen);",
+            "    char* o=out;",
+            "    const char* cur=s;",
+            "    const char* next;",
+            "    while((next=strstr(cur,from))){",
+            "        memcpy(o,cur,next-cur);o+=next-cur;",
+            "        memcpy(o,to,tl);o+=tl;",
+            "        cur=next+fl;",
+            "    }",
+            "    strcpy(o,cur);",
+            "    return out;",
+            "}",
             "char* __xlang_str_reverse(const char* s) {",
             "    int32_t n = (int32_t)strlen(s);",
             "    char* out = (char*)malloc(n + 1);",
@@ -1477,6 +1508,20 @@ impl CGen {
             "    }",
             "    return (int32_t)((size_t)len - remaining);",
             "}",
+            "// Like sendfile_fd but starts at a given byte offset — used for HTTP 206",
+            "// Partial Content / Range requests. `off` is the starting offset; the",
+            "// kernel sendfile(2) advances its own offset pointer from there.",
+            "int32_t __xlang_sendfile_range(int32_t out_fd, int32_t in_fd, int32_t offset, int32_t len) {",
+            "    off_t off = (off_t)offset;",
+            "    size_t remaining = (size_t)len;",
+            "    while (remaining > 0) {",
+            "        ssize_t s = sendfile(out_fd, in_fd, &off, remaining);",
+            "        if (s > 0) { remaining -= (size_t)s; continue; }",
+            "        if (s < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { sched_yield(); continue; }",
+            "        break;",
+            "    }",
+            "    return (int32_t)((size_t)len - remaining);",
+            "}",
             "int32_t __xlang_dir_count(const char* path) {",
             "    DIR* d = opendir(path);",
             "    if (!d) return 0;",
@@ -1628,6 +1673,35 @@ impl CGen {
             }
             "str_reverse" => format!("__xlang_str_reverse({a})"),
             "str_trim" => format!("__xlang_str_trim({a})"),
+            "str_contains" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_str_contains({a}, {b})")
+            }
+            "str_starts_with" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_str_starts_with({a}, {b})")
+            }
+            "str_ends_with" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_str_ends_with({a}, {b})")
+            }
+            "str_replace" => {
+                let (Some(second), Some(third)) = (args.get(1), args.get(2)) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                let c = self.gen_expr(third)?;
+                format!("__xlang_str_replace({a}, {b}, {c})")
+            }
             "str_translate" => {
                 let (Some(second), Some(third)) = (args.get(1), args.get(2)) else {
                     return Ok(None);
@@ -1769,6 +1843,15 @@ impl CGen {
                 let b = self.gen_expr(second)?;
                 let c = self.gen_expr(third)?;
                 format!("__xlang_sendfile_fd({a}, {b}, {c})")
+            }
+            "sendfile_range" => {
+                if args.len() < 4 {
+                    return Ok(None);
+                }
+                let b = self.gen_expr(&args[1])?;
+                let c = self.gen_expr(&args[2])?;
+                let d = self.gen_expr(&args[3])?;
+                format!("__xlang_sendfile_range({a}, {b}, {c}, {d})")
             }
             "send_str" => {
                 let Some(second) = args.get(1) else {
