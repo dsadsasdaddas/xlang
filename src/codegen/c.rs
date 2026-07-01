@@ -1464,6 +1464,11 @@ impl CGen {
             "int32_t __xlang_open_append(const char* path) {",
             "    return (int32_t)open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);",
             "}",
+            "// lseek(fd, offset, SEEK_SET) — set the file offset. Returns the new",
+            "// offset, or -1. Used by dd for skip/seek (random file access).",
+            "int32_t __xlang_seek(int32_t fd, int32_t offset) {",
+            "    return (int32_t)lseek(fd, (off_t)offset, SEEK_SET);",
+            "}",
             "// Process control for the shell: pipe(2) ends in globals (one pipeline",
             "// at a time — the shell waits on each line before reading the next).",
             "static int32_t __xlang_pipe_r = -1;",
@@ -1917,6 +1922,13 @@ impl CGen {
             "read_fd" => format!("__xlang_read_fd({a})"),
             "open_write" => format!("__xlang_open_write({a})"),
             "open_append" => format!("__xlang_open_append({a})"),
+            "seek" => {
+                let Some(second) = args.get(1) else {
+                    return Ok(None);
+                };
+                let b = self.gen_expr(second)?;
+                format!("__xlang_seek({a}, {b})")
+            }
             "make_pipe_at" => format!("__xlang_make_pipe_at({a})"),
             "pipe_r_at" => format!("__xlang_pipe_r_at({a})"),
             "pipe_w_at" => format!("__xlang_pipe_w_at({a})"),
