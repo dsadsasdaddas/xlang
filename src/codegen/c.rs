@@ -1376,6 +1376,21 @@ impl CGen {
             "    }",
             "    return (int32_t)((size_t)len - remaining);",
             "}",
+            "// Write len bytes from __xlang_rbuf+offset to ANY fd (file, stdout, ...)",
+            "// via write(2) — binary-safe (NULs ignored), unlike send_rbuf which uses",
+            "// send() (sockets only). Loops past partial writes. Used by httpget to",
+            "// save binary response bodies to a file or stdout.",
+            "int32_t __xlang_write_rbuf(int32_t fd, int32_t offset, int32_t len) {",
+            "    size_t off = (size_t)offset;",
+            "    size_t remaining = (size_t)len;",
+            "    while (remaining > 0) {",
+            "        ssize_t s = write(fd, __xlang_rbuf + off, remaining);",
+            "        if (s > 0) { off += (size_t)s; remaining -= (size_t)s; continue; }",
+            "        if (s < 0 && errno == EINTR) { continue; }",
+            "        break;",
+            "    }",
+            "    return (int32_t)((size_t)len - remaining);",
+            "}",
             "// epoll event-loop support. A single global epoll fd + a ready-fd",
             "// ring buffer, so xlang treats epoll_wait(timeout) as \"next ready fd\".",
             "#define __XLANG_EPQ_CAP 8192",
@@ -1935,6 +1950,14 @@ impl CGen {
                 };
                 let b = self.gen_expr(second)?;
                 format!("__xlang_send_rbuf({a}, {b})")
+            }
+            "write_rbuf" => {
+                if args.len() < 3 {
+                    return Ok(None);
+                }
+                let b = self.gen_expr(&args[1])?;
+                let c = self.gen_expr(&args[2])?;
+                format!("__xlang_write_rbuf({a}, {b}, {c})")
             }
             _ => return Ok(None),
         };
