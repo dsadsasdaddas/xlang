@@ -60,8 +60,8 @@ fn main(): i32 {
     }
 
     // -- match with OR-patterns and ranges --
-    let n: i32 = 7
-    match n {
+    let digit: i32 = 7
+    match digit {
         0 | 1 => { print_raw("boolean-ish\n") }
         2..=9 => { print_raw("single digit\n") }   // 7 matches here
         10..99 => { print_raw("two digits\n") }
