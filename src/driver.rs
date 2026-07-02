@@ -268,7 +268,11 @@ pub fn diagnostics_to_gcc(diags: &Diagnostics, source: &str, file: &str) -> Vec<
 
 pub fn write_c(source: &Path, output: Option<PathBuf>) -> XResult<PathBuf> {
     let program = parse_file(source)?;
-    let c_code = CGen::new().generate(&program)?;
+    // Re-run typecheck to obtain the expression type map (parse_file already
+    // validated the program is clean). The program is the same instance, so the
+    // node addresses in the map line up with what codegen walks.
+    let (_diags, types) = crate::typecheck::check_program_typed(&program);
+    let c_code = CGen::with_types(types).generate(&program)?;
     let output = output.unwrap_or_else(|| {
         let stem = source.file_stem().unwrap_or_default().to_string_lossy();
         PathBuf::from("build").join(format!("{stem}.c"))

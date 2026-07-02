@@ -44,15 +44,43 @@ struct Checker {
     structs: HashMap<String, Vec<(String, CheckedType)>>,
     return_types: Vec<CheckedType>,
     diags: Diagnostics,
+    /// Inferred type of every expression, keyed by the address of its
+    /// `Spanned<Expr>` node. The AST is shared (by reference) between
+    /// typecheck and codegen, so these heap-node addresses are stable across
+    /// both passes — letting codegen look up an operand's type (e.g. to decide
+    /// whether `+` is numeric add or string concat) without re-deriving it.
+    types: HashMap<usize, CheckedType>,
+}
+
+/// Map of expression-node address → inferred type, produced by typecheck and
+/// consumed by codegen. Keyed by `&Spanned<Expr> as *const _ as usize`.
+#[derive(Default)]
+pub struct TypeMap(HashMap<usize, CheckedType>);
+
+impl TypeMap {
+    /// Whether the expression at this node inferred to a string type (a `String`
+    /// value or a string literal). Used by codegen to lower `+` as concatenation.
+    pub fn is_string(&self, expr: &Spanned<Expr>) -> bool {
+        self.0
+            .get(&(expr as *const Spanned<Expr> as usize))
+            .map(|t| t.is_string())
+            .unwrap_or(false)
+    }
 }
 
 /// Type-check `program`, returning all accumulated diagnostics (empty = clean).
 pub fn check_program(program: &Program) -> Diagnostics {
+    check_program_typed(program).0
+}
+
+/// Like [`check_program`] but also returns the inferred type of every
+/// expression ([`TypeMap`]), for codegen passes that need operand types.
+pub fn check_program_typed(program: &Program) -> (Diagnostics, TypeMap) {
     let mut checker = Checker::default();
     checker.collect_functions(program);
     checker.collect_structs(program);
     checker.check_program(program);
-    checker.diags
+    (checker.diags, TypeMap(checker.types))
 }
 
 impl Checker {
@@ -286,6 +314,15 @@ impl Checker {
     }
 
     fn infer_expr(&mut self, expr: &Spanned<Expr>) -> CheckedType {
+        let ty = self.infer_expr_inner(expr);
+        // Record the inferred type keyed by the node's stable address, so
+        // codegen can look up operand types (e.g. `+` → concat vs add).
+        self.types
+            .insert(expr as *const Spanned<Expr> as usize, ty.clone());
+        ty
+    }
+
+    fn infer_expr_inner(&mut self, expr: &Spanned<Expr>) -> CheckedType {
         let span = expr.span;
         match &expr.node {
             Expr::IntLiteral { .. } => CheckedType::IntLiteral,
@@ -424,6 +461,27 @@ impl Checker {
         let left_ty = self.infer_expr(left);
         let right_ty = self.infer_expr(right);
         match op {
+            // String concatenation: `s1 + s2` (and `"x" + s`, etc.) desugars to
+            // str_concat in codegen. If either operand is a string, the result
+            // is a string; a concretely non-string operand alongside one is a
+            // type error (Unknown is poison and allowed through).
+            "+" if left_ty.is_string() || right_ty.is_string() => {
+                if !left_ty.is_string() && !left_ty.is_unknown() {
+                    self.emit(
+                        span,
+                        ErrorCode::TypeOperatorMismatch,
+                        format!("cannot concatenate String with {}", left_ty.display()),
+                    );
+                }
+                if !right_ty.is_string() && !right_ty.is_unknown() {
+                    self.emit(
+                        span,
+                        ErrorCode::TypeOperatorMismatch,
+                        format!("cannot concatenate String with {}", right_ty.display()),
+                    );
+                }
+                CheckedType::named("String")
+            }
             "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>" => {
                 self.infer_numeric_result(op, &left_ty, &right_ty, span)
             }
@@ -515,7 +573,9 @@ impl Checker {
             for arg in args {
                 self.infer_expr(arg);
             }
-            return CheckedType::Unknown;
+            // Fallback: a compiler builtin (lowered directly in codegen). Infer
+            // its declared return type so dependent checks (e.g. `+`) work.
+            return builtin_return_type(name).unwrap_or(CheckedType::Unknown);
         }
 
         self.infer_expr(callee);
@@ -752,6 +812,11 @@ impl CheckedType {
         matches!(self, Self::Named { name, args } if name == "bool" && args.is_empty())
     }
 
+    fn is_string(&self) -> bool {
+        matches!(self, Self::StringLiteral)
+            || matches!(self, Self::Named { name, args } if name == "String" && args.is_empty())
+    }
+
     fn is_int_literal(&self) -> bool {
         matches!(self, Self::IntLiteral)
     }
@@ -817,6 +882,43 @@ fn array_len(ty: &CheckedType) -> Option<usize> {
 
 fn is_builtin_variant(name: &str) -> bool {
     matches!(name, "Some" | "None" | "Ok" | "Err")
+}
+
+/// Declared return type of each compiler builtin (the functions lowered directly
+/// in codegen, not user-defined). This lets the type checker infer call results
+/// — so `str_len(s) + 1` typechecks as i32, and `s + str_len(s)` is correctly
+/// rejected as String+i32. Names are matched only as a fallback (after
+/// user-defined functions), so a user `fn str_len` shadows the builtin. Returns
+/// `None` for builtins whose result type isn't worth tracking (void I/O, etc.),
+/// which typecheck then treats as the Unknown poison.
+fn builtin_return_type(name: &str) -> Option<CheckedType> {
+    let ty = match name {
+        // String-producing.
+        "str_concat" | "str_lower" | "str_upper" | "str_replace" | "str_replace_first"
+        | "str_repeat" | "str_slice" | "str_trim" | "str_reverse" | "str_translate" | "chr"
+        | "int_to_str" | "float_to_str" | "read_file" | "read_stdin" | "recv_str" | "rbuf_str"
+        | "argv" | "sb_str" => CheckedType::named("String"),
+        // i32-producing.
+        "str_len" | "str_char_at" | "str_find" | "str_find_from" | "str_to_int"
+        | "str_to_int_oct" | "str_cmp" | "argc" | "vec_len" | "abs" | "max" | "min"
+        | "rbuf_byte_at" | "fork" | "wait_pid_status" | "stat_field" | "recv_n" | "read_rbuf"
+        | "open_append" | "close_fd" | "seek" | "tcp_connect" | "sendfile_range" | "now_s" => {
+            CheckedType::named("i32")
+        }
+        // f64-producing.
+        "str_to_float" | "int_to_f64" => CheckedType::named("f64"),
+        // Note: the boolean string-search builtins (str_contains,
+        // str_starts_with, str_ends_with, str_eq) are intentionally LEFT
+        // UNTRACKED (None → Unknown). Their C runtime returns int 0/1, and
+        // existing code uses them two ways — `str_eq(a,b) == 1` (int compare)
+        // and `if str_contains(...)` (bool context). Only Unknown satisfies
+        // both (expect_bool and the `==` check both pass Unknown); typing them
+        // bool or i32 would break one usage. The cost is `s + str_contains(..)`
+        // isn't caught — rare and benign.
+        // Void / untracked — no useful value type.
+        _ => return None,
+    };
+    Some(ty)
 }
 
 #[cfg(test)]
@@ -1278,6 +1380,65 @@ fn main(): i32 {
         assert!(
             first_message(&diags).contains("range end"),
             "should flag non-numeric range end: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_string_concatenation() {
+        // `a + b`, `"x" + a`, and chained `a + b + c` all typecheck as String.
+        let diags = check_source(
+            r#"
+module main
+
+fn cat(a: String, b: String): String {
+    return a + b + "!"
+}
+
+fn main(): i32 { return 0 }
+"#,
+        );
+        assert!(
+            diags.items.is_empty(),
+            "string + should typecheck: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_string_plus_integer() {
+        let diags = check_source(
+            r#"
+module main
+fn main(): i32 {
+    let s: String = "x"
+    let r: String = s + 5
+    print_str(r)
+    return 0
+}
+"#,
+        );
+        assert!(
+            first_message(&diags).contains("cannot concatenate String"),
+            "should reject String + int: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_string_plus_numeric_builtin() {
+        // str_len is a known i32 builtin, so this is String + i32 → rejected.
+        let diags = check_source(
+            r#"
+module main
+fn main(): i32 {
+    let s: String = "hello"
+    let r: String = s + str_len(s)
+    print_str(r)
+    return 0
+}
+"#,
+        );
+        assert!(
+            first_message(&diags).contains("cannot concatenate String with i32"),
+            "should reject String + str_len (i32 builtin): {diags:?}"
         );
     }
 

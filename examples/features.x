@@ -102,6 +102,14 @@ fn main(): i32 {
     print_raw(str_repeat("=", 5))
     print_raw("\n")
 
+    // -- string concatenation with + (driven by operand types) --
+    // `+` on strings lowers to str_concat; `+` on ints stays numeric. The
+    // compiler knows the type of every expression, so `"a" + b + 1` is a
+    // clean type error (String + i32), not silent pointer arithmetic.
+    let who: String = "World"
+    print_raw("Hello, " + who + "!" + " (" + int_to_str(str_len(who)) + " letters)")
+    print_raw("\n")
+
     // -- math builtins --
     print_raw("abs(-7)=")
     print_raw(int_to_str(abs(-7)))
