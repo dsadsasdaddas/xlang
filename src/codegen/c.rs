@@ -90,17 +90,11 @@ impl CGen {
         self.emit_runtime_preamble();
         self.emit_networking_preamble();
 
-        // User struct definitions first, so wrapper typedefs (Array/Vec/...)
-        // that reference them (e.g. Array<Student, 3>) see a complete type.
-        for item in &program.items {
-            if let Item::StructDecl { .. } = &item.node {
-                self.gen_struct(&item.node)?;
-                self.emit("");
-            }
-        }
-
-        for typedef in self.collect_runtime_typedefs(program)? {
-            self.emit(&typedef);
+        // User struct definitions AND wrapper typedefs (Vec/Array/Option/...),
+        // emitted together in dependency order: a struct with a `Vec<T>` field
+        // must follow `Vec_T`, and a `Vec<MyStruct>` must follow `MyStruct`.
+        for def in self.collect_runtime_typedefs(program)? {
+            self.emit(&def);
         }
         if !self.lines.last().is_some_and(|line| line.is_empty()) {
             self.emit("");
@@ -156,10 +150,16 @@ impl CGen {
         let mut typedefs = BTreeMap::new();
         for item in &program.items {
             match &item.node {
-                Item::StructDecl { fields, .. } => {
+                Item::StructDecl { name, fields } => {
                     for field in fields {
                         self.collect_type_typedefs(&field.ty, &mut typedefs)?;
                     }
+                    // Collect the struct's own definition too, so it is emitted
+                    // in dependency order with the wrapper typedefs its fields
+                    // reference (e.g. a struct with a `Vec<T>` field must come
+                    // after `Vec_T`).
+                    let def = self.struct_def(&item.node)?;
+                    typedefs.entry(name.clone()).or_insert(def);
                 }
                 Item::TypeAliasDecl { ty, .. } => {
                     self.collect_type_typedefs(ty, &mut typedefs)?;
@@ -498,18 +498,23 @@ impl CGen {
         format!("__xlang_{prefix}{id}")
     }
 
-    fn gen_struct(&mut self, item: &Item) -> XResult<()> {
+    /// Build a user struct's `typedef struct {...} Name;` as a string (for
+    /// dependency-ordered emission alongside wrapper typedefs — a struct with a
+    /// `Vec<T>` field must be emitted after the `Vec_T` typedef).
+    fn struct_def(&self, item: &Item) -> XResult<String> {
         let Item::StructDecl { name, fields } = item else {
             unreachable!();
         };
-        self.emit(&format!("typedef struct {name} {{"));
-        self.indent += 1;
+        let mut out = format!("typedef struct {name} {{\n");
         for field in fields {
-            self.emit(&format!("{} {};", self.c_type(&field.ty)?, field.name));
+            out.push_str(&format!(
+                "    {} {};\n",
+                self.c_type(&field.ty)?,
+                field.name
+            ));
         }
-        self.indent -= 1;
-        self.emit(&format!("}} {name};"));
-        Ok(())
+        out.push_str(&format!("}} {name};"));
+        Ok(out)
     }
 
     /// Emit a forward declaration so functions may appear in any source order.
@@ -2785,6 +2790,21 @@ mod tests {
         assert!(
             c.contains("__xlang_m") && c.contains(".some"),
             "if let on a call should bind a temp and test the discriminant: {c}"
+        );
+    }
+
+    #[test]
+    fn orders_vec_typedef_before_struct_using_it() {
+        // A struct with a `Vec<T>` field must be emitted AFTER the `Vec_T`
+        // typedef (it contains `Vec_T counts;` by value). Regression for a bug
+        // where the struct was emitted first → "unknown type name Vec_i32".
+        let c =
+            gen_c_typed("module main\nstruct Bag { items: Vec<i32> }\nfn main(): i32 { return 0 }");
+        let vec_pos = c.find("} Vec_i32;").unwrap_or(usize::MAX);
+        let struct_pos = c.find("} Bag;").unwrap_or(usize::MAX);
+        assert!(
+            vec_pos < struct_pos,
+            "Vec_i32 typedef should precede the Bag struct that uses it: {c}"
         );
     }
 
