@@ -22,11 +22,25 @@ pub struct CGen {
     fn_return: Option<TypeNode>,
     /// User-defined struct names (so `c_type` recognises them as value types).
     struct_names: HashSet<String>,
+    /// Inferred type of each expression (from typecheck), keyed by node address.
+    /// Lets us lower `+` as string concat vs numeric add by inspecting operand
+    /// types. Empty for the test path (`CGen::new()`), where `+` is always
+    /// numeric.
+    types: crate::typecheck::TypeMap,
 }
 
 impl CGen {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct with an expression type map (from `check_program_typed`) so
+    /// codegen can make type-dependent lowering decisions (string `+`).
+    pub fn with_types(types: crate::typecheck::TypeMap) -> Self {
+        Self {
+            types,
+            ..Self::default()
+        }
     }
 
     pub fn generate(mut self, program: &Program) -> XResult<String> {
@@ -2398,12 +2412,22 @@ impl CGen {
                 "array literals are only supported in typed Array<T, N> let initializers"
                     .to_string(),
             )),
-            Expr::BinaryExpr { op, left, right } => Ok(format!(
-                "({} {} {})",
-                self.gen_expr(left)?,
-                op,
-                self.gen_expr(right)?
-            )),
+            Expr::BinaryExpr { op, left, right } => {
+                // `+` on strings lowers to __xlang_str_concat (decided by the
+                // type map: an operand inferred as String makes this a concat).
+                if op == "+" && (self.types.is_string(left) || self.types.is_string(right)) {
+                    let l = self.gen_expr(left)?;
+                    let r = self.gen_expr(right)?;
+                    Ok(format!("__xlang_str_concat({l}, {r})"))
+                } else {
+                    Ok(format!(
+                        "({} {} {})",
+                        self.gen_expr(left)?,
+                        op,
+                        self.gen_expr(right)?
+                    ))
+                }
+            }
             Expr::UnaryExpr { op, value } => Ok(format!("({}{})", op, self.gen_expr(value)?)),
             Expr::AssignmentExpr { target, value } => Ok(format!(
                 "({} = {})",
@@ -2466,6 +2490,16 @@ mod tests {
         let (tokens, _) = Lexer::new(source).tokenize();
         let program = Parser::new(tokens, "<test>").parse().expect("parse source");
         CGen::new().generate(&program).expect("codegen")
+    }
+
+    /// Like `gen_c` but runs the full typed pipeline (parse → typecheck →
+    /// codegen with the TypeMap), so type-dependent lowering (string `+`) is
+    /// exercised the same way `write_c` does it.
+    fn gen_c_typed(source: &str) -> String {
+        let (tokens, _) = Lexer::new(source).tokenize();
+        let program = Parser::new(tokens, "<test>").parse().expect("parse source");
+        let (_diags, types) = crate::typecheck::check_program_typed(&program);
+        CGen::with_types(types).generate(&program).expect("codegen")
     }
 
     #[test]
@@ -2542,6 +2576,31 @@ mod tests {
         assert!(
             c.contains("for (int32_t k = 1; k <= __xlang_rg_end"),
             "no inclusive numeric for-loop: {c}"
+        );
+    }
+
+    #[test]
+    fn lowers_string_plus_to_concat() {
+        // `s1 + s2` lowers to __xlang_str_concat (driven by the type map).
+        let c = gen_c_typed(
+            "module main\nfn cat(a: String, b: String): String { return a + b }\nfn main(): i32 { return 0 }",
+        );
+        assert!(
+            c.contains("return __xlang_str_concat(a, b);"),
+            "string + should lower to concat: {c}"
+        );
+        // A numeric + must stay a plain add (the runtime always *defines*
+        // __xlang_str_concat, so check the call site, not the bare name).
+        let c2 = gen_c_typed(
+            "module main\nfn add(a: i32, b: i32): i32 { return a + b }\nfn main(): i32 { return 0 }",
+        );
+        assert!(
+            c2.contains("return (a + b);"),
+            "numeric + should stay an add: {c2}"
+        );
+        assert!(
+            !c2.contains("__xlang_str_concat(a, b)"),
+            "numeric + must not call concat: {c2}"
         );
     }
 
