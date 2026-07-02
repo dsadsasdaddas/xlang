@@ -907,10 +907,14 @@ fn builtin_return_type(name: &str) -> Option<CheckedType> {
         }
         // f64-producing.
         "str_to_float" | "int_to_f64" => CheckedType::named("f64"),
-        // bool-producing.
-        "str_contains" | "str_starts_with" | "str_ends_with" | "str_eq" => {
-            CheckedType::named("bool")
-        }
+        // Note: the boolean string-search builtins (str_contains,
+        // str_starts_with, str_ends_with, str_eq) are intentionally LEFT
+        // UNTRACKED (None → Unknown). Their C runtime returns int 0/1, and
+        // existing code uses them two ways — `str_eq(a,b) == 1` (int compare)
+        // and `if str_contains(...)` (bool context). Only Unknown satisfies
+        // both (expect_bool and the `==` check both pass Unknown); typing them
+        // bool or i32 would break one usage. The cost is `s + str_contains(..)`
+        // isn't caught — rare and benign.
         // Void / untracked — no useful value type.
         _ => return None,
     };
