@@ -111,5 +111,30 @@ fn main(): i32 {
     print_raw(int_to_str(min(3, 9)))
     print_raw("\n")
 
+    // -- based integer literals (hex 0x, binary 0b, octal 0o) + bitwise --
+    // Systems-code idiom: bitmasks. Literals parse to their decimal value and
+    // lower to plain C integer literals.
+    let mask: i32 = 0xFF
+    let bits: i32 = 0b1100
+    print_raw("0xFF=")
+    print_raw(int_to_str(mask))
+    print_raw(" 0b1100=")
+    print_raw(int_to_str(bits))
+    print_raw(" 0xF0|0x0F=")
+    print_raw(int_to_str(0xF0 | 0x0F))
+    print_raw(" 0xFF&0x0F=")
+    print_raw(int_to_str(0xFF & 0x0F))
+    print_raw("\n")
+
+    // -- inclusive numeric range (for i in a..=b) --
+    // sum 1..=5 = 15. Exclusive `..` shown earlier (sum 0..100).
+    let mut inc: i32 = 0
+    for k in 1..=5 {
+        inc += k
+    }
+    print_raw("sum 1..=5 = ")
+    print_raw(int_to_str(inc))
+    print_raw("\n")
+
     return 0
 }

@@ -404,7 +404,7 @@ impl Checker {
             // iterable; infer_expr validates both ends are numeric. The range
             // itself is not a first-class value (CheckedType::Unknown), so using
             // one elsewhere is caught downstream.
-            Expr::RangeExpr { start, end } => {
+            Expr::RangeExpr { start, end, .. } => {
                 let start_ty = self.infer_expr(start);
                 let end_ty = self.infer_expr(end);
                 self.expect_numeric(&start_ty, "range start", start.span);
