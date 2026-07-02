@@ -174,6 +174,34 @@ impl Lexer {
 
     fn lex_number(&mut self) {
         let start_byte = self.byte_offset;
+        // Based integer literal: 0x (hex), 0b (binary), 0o (octal). These are
+        // parsed to their decimal value so codegen can emit a plain decimal
+        // literal (uniform, C-valid on every compiler — `0b..` is C23-only and
+        // `0o..` isn't C at all). A leading 0 followed by a non-base char is a
+        // normal decimal (e.g. `0`, `08`).
+        if self.peek_char(0) == '0' && !self.is_eof() {
+            match self.peek_char(1) {
+                'x' | 'X' => {
+                    self.advance();
+                    self.advance();
+                    self.lex_based_int(16, start_byte as u32);
+                    return;
+                }
+                'b' | 'B' => {
+                    self.advance();
+                    self.advance();
+                    self.lex_based_int(2, start_byte as u32);
+                    return;
+                }
+                'o' | 'O' => {
+                    self.advance();
+                    self.advance();
+                    self.lex_based_int(8, start_byte as u32);
+                    return;
+                }
+                _ => {}
+            }
+        }
         let start_idx = self.i;
         while !self.is_eof() && self.peek_char(0).is_ascii_digit() {
             self.advance();
@@ -194,6 +222,39 @@ impl Lexer {
             start: start_byte as u32,
             end: end_byte as u32,
         });
+    }
+
+    /// Lex the digit run of a based integer (base 2/8/16) and emit an Int token
+    /// whose text is the decimal value. Underscore separators (`0xFF_FF`) are
+    /// allowed and stripped before parsing.
+    fn lex_based_int(&mut self, base: u32, start_byte: u32) {
+        let digit_start = self.i;
+        while !self.is_eof() && self.is_digit_in_base(self.peek_char(0), base) {
+            self.advance();
+        }
+        let raw: String = self.chars[digit_start..self.i]
+            .iter()
+            .filter(|c| **c != '_')
+            .collect();
+        // from_str_radix rejects empty / out-of-range; fall back to 0 so a
+        // malformed literal like `0x` degrades to 0 rather than panicking.
+        let value = u64::from_str_radix(&raw, base).unwrap_or(0);
+        let end_byte = self.byte_offset;
+        self.tokens.push(Token {
+            kind: TokenKind::Int,
+            text: value.to_string(),
+            start: start_byte,
+            end: end_byte as u32,
+        });
+    }
+
+    fn is_digit_in_base(&self, c: char, base: u32) -> bool {
+        match base {
+            16 => c.is_ascii_hexdigit() || c == '_',
+            8 => ('0'..='7').contains(&c) || c == '_',
+            2 => c == '0' || c == '1' || c == '_',
+            _ => c.is_ascii_digit(),
+        }
     }
 
     fn lex_string(&mut self) {
@@ -242,7 +303,7 @@ impl Lexer {
     fn match_multi_symbol(&mut self) -> Option<String> {
         for sym in [
             "=>", "==", "!=", ">=", "<=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "<<", ">>",
-            "..",
+            "..=", "..",
         ] {
             let sym_chars: Vec<char> = sym.chars().collect();
             if self.chars.get(self.i..self.i + sym_chars.len()) == Some(sym_chars.as_slice()) {
@@ -318,14 +379,39 @@ mod tests {
     fn lexes_range_operator() {
         // `0..10` must NOT be swallowed as a float: the number lexer only
         // extends past '.' when the next char is a digit, so `0` is an int and
-        // `..` is its own symbol.
+        // `..` is its own symbol. `..=` is the inclusive form (longest match).
         let (toks, _) = lex("0..10");
         let texts: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts, vec!["0", "..", "10", "<eof>"]);
-        // A single dot (field access) is unaffected by adding `..`.
+        let (toks3, _) = lex("0..=10");
+        let texts3: Vec<&str> = toks3.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts3, vec!["0", "..=", "10", "<eof>"]);
+        // A single dot (field access) is unaffected by adding `..`/`..=`.
         let (toks2, _) = lex("a.b");
         let texts2: Vec<&str> = toks2.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts2, vec!["a", ".", "b", "<eof>"]);
+    }
+
+    #[test]
+    fn lexes_based_int_literals() {
+        // 0x/0b/0o prefixes parse to their decimal value (so codegen emits a
+        // plain decimal literal, C-valid on every compiler).
+        let cases = [
+            ("0xFF", "255"),
+            ("0x1A", "26"),
+            ("0b1010", "10"),
+            ("0b1111", "15"),
+            ("0o17", "15"),
+            ("0o777", "511"),
+            ("0xFF_FF", "65535"), // underscore separator allowed
+            ("0", "0"),           // plain zero stays decimal
+            ("255", "255"),       // plain decimal unaffected
+        ];
+        for (src, want) in cases {
+            let (toks, _) = lex(src);
+            assert_eq!(toks[0].kind, TokenKind::Int, "{src}: kind");
+            assert_eq!(toks[0].text, want, "{src}: value");
+        }
     }
 
     #[test]

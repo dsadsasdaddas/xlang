@@ -431,12 +431,24 @@ impl Parser {
     fn parse_for_iterable(&mut self) -> Result<Spanned<Expr>, Diagnostic> {
         let start_span = self.cur_start();
         let begin = self.parse_expr()?;
+        if self.match_text("..=") {
+            let end = self.parse_expr()?;
+            return Ok(Spanned::new(
+                Expr::RangeExpr {
+                    start: Box::new(begin),
+                    end: Box::new(end),
+                    inclusive: true,
+                },
+                self.span_from(start_span),
+            ));
+        }
         if self.match_text("..") {
             let end = self.parse_expr()?;
             return Ok(Spanned::new(
                 Expr::RangeExpr {
                     start: Box::new(begin),
                     end: Box::new(end),
+                    inclusive: false,
                 },
                 self.span_from(start_span),
             ));

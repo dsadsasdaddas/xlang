@@ -709,9 +709,15 @@ impl CGen {
         iterable: &Spanned<Expr>,
         body: &Block,
     ) -> XResult<()> {
-        // Numeric range `for i in start..end` -> C `for (i = start; i < end; i++)`.
-        if let Expr::RangeExpr { start, end } = &iterable.node {
-            return self.gen_range_for(iterator, start, end, body);
+        // Numeric range `for i in start..end` (or `start..=end`) -> C
+        // `for (i = start; i (<|<=) end; i++)`.
+        if let Expr::RangeExpr {
+            start,
+            end,
+            inclusive,
+        } = &iterable.node
+        {
+            return self.gen_range_for(iterator, start, end, *inclusive, body);
         }
 
         let Expr::Identifier {
@@ -772,27 +778,30 @@ impl CGen {
         Ok(())
     }
 
-    /// Lower `for i in start..end` to a C numeric for loop. The end bound is
-    /// captured into a temp once so a loop like `for i in 0..vec.len` evaluates
-    /// the bound a single time (matching the for-in-over-collection semantics,
-    /// where the bound is fixed at loop entry).
+    /// Lower `for i in start..end` (or `start..=end`) to a C numeric for loop.
+    /// The end bound is captured into a temp once so a loop like
+    /// `for i in 0..vec.len` evaluates the bound a single time (matching the
+    /// for-in-over-collection semantics, where the bound is fixed at loop entry).
+    /// `inclusive` selects `<` (exclusive `..`) vs `<=` (inclusive `..=`).
     fn gen_range_for(
         &mut self,
         iterator: &str,
         start: &Spanned<Expr>,
         end: &Spanned<Expr>,
+        inclusive: bool,
         body: &Block,
     ) -> XResult<()> {
         let start_c = self.gen_expr(start)?;
         let end_c = self.gen_expr(end)?;
         let end_tmp = self.next_temp("rg_end");
+        let cmp = if inclusive { "<=" } else { "<" };
         // Wrap in a block so the captured bound temp doesn't leak, and so the
         // iterator name can shadow an outer variable of the same name safely.
         self.emit("{");
         self.indent += 1;
         self.emit(&format!("int32_t {end_tmp} = {end_c};"));
         self.emit(&format!(
-            "for (int32_t {iterator} = {start_c}; {iterator} < {end_tmp}; {iterator}++) {{"
+            "for (int32_t {iterator} = {start_c}; {iterator} {cmp} {end_tmp}; {iterator}++) {{"
         ));
         self.indent += 1;
         self.push_scope();
@@ -2522,6 +2531,18 @@ mod tests {
             "no numeric for-loop: {c}"
         );
         assert!(c.contains("i++)"), "no increment: {c}");
+    }
+
+    #[test]
+    fn lowers_inclusive_range_for_loop() {
+        // `for i in 0..=n` -> C `for (i = 0; i <= bound; i++)`.
+        let c = gen_c(
+            "module main\nfn main(): i32 { let mut c: i32 = 0 for k in 1..=5 { c += k } return c }",
+        );
+        assert!(
+            c.contains("for (int32_t k = 1; k <= __xlang_rg_end"),
+            "no inclusive numeric for-loop: {c}"
+        );
     }
 
     #[test]
