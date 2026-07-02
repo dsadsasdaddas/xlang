@@ -21,8 +21,11 @@ impl Stack {
     }
     fn sum(self: Stack): i32 {
         let mut total: i32 = 0
-        for v in self.data {
-            total += v
+        let n: i32 = vec_len(self.data)
+        let mut i: i32 = 0
+        while i < n {
+            total += self.data[i]
+            i += 1
         }
         return total
     }
