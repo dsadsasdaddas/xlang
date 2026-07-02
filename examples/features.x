@@ -8,6 +8,19 @@ struct Point {
     y: i32
 }
 
+// Methods on Point: `impl Type { fn name(self: Type, ...): T { ... } }`.
+// Methods compile to mangled free functions; `p.method()` dispatches via the
+// receiver's type. Chained calls work (a method returning Point can be followed
+// by another method).
+impl Point {
+    fn length_sq(self: Point): i32 {
+        return self.x * self.x + self.y * self.y
+    }
+    fn with_offset(self: Point, dx: i32, dy: i32): Point {
+        return Point { x: self.x + dx, y: self.y + dy }
+    }
+}
+
 // Recursive fibonacci (i32).
 fn fib(n: i32): i32 {
     if n < 2 { return n }
@@ -26,6 +39,15 @@ fn main(): i32 {
     }
     print_raw("total_x = ")
     print_raw(int_to_str(total_x))
+    print_raw("\n")
+
+    // -- methods (impl blocks) --
+    let origin: Point = Point { x: 0, y: 0 }
+    let corner: Point = origin.with_offset(3, 4)
+    print_raw("length_sq(3,4) = ")
+    print_raw(int_to_str(corner.length_sq()))       // 25
+    print_raw("  chained = ")
+    print_raw(int_to_str(origin.with_offset(5, 12).length_sq()))  // 169
     print_raw("\n")
 
     // -- match with integer literals + wildcard --

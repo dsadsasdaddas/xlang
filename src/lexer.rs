@@ -325,6 +325,7 @@ fn is_keyword(text: &str) -> bool {
             | "struct"
             | "type"
             | "fn"
+            | "impl"
             | "let"
             | "mut"
             | "if"

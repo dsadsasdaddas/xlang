@@ -11,6 +11,14 @@ fn i32_type() -> TypeNode {
     }
 }
 
+/// Mangled C name for an `impl Type` method: `__xlang_method_<Type>_<name>`.
+/// Unique per (type, method), and the `__xlang_method_` prefix can't collide
+/// with user identifiers (which can't start with two underscores... they can,
+/// but the convention is reserved).
+fn method_fn_name(type_name: &str, method_name: &str) -> String {
+    format!("__xlang_method_{type_name}_{method_name}")
+}
+
 #[derive(Default)]
 pub struct CGen {
     lines: Vec<String>,
@@ -27,6 +35,10 @@ pub struct CGen {
     /// types. Empty for the test path (`CGen::new()`), where `+` is always
     /// numeric.
     types: crate::typecheck::TypeMap,
+    /// Methods declared in `impl` blocks: (type_name, method_name) → mangled C
+    /// function name (`__xlang_method_<Type>_<method>`). Used to dispatch
+    /// `obj.method(args)` calls.
+    methods: HashMap<(String, String), String>,
 }
 
 impl CGen {
@@ -47,6 +59,23 @@ impl CGen {
         for item in &program.items {
             if let Item::StructDecl { name, .. } = &item.node {
                 self.struct_names.insert(name.clone());
+            }
+        }
+        // Register impl-block methods: (type, method) → mangled free-function
+        // name. Done before generating any code so dispatch works regardless of
+        // source order.
+        for item in &program.items {
+            if let Item::ImplDecl {
+                type_name, methods, ..
+            } = &item.node
+            {
+                for method in methods {
+                    if let Item::FnDecl { name, .. } = &method.node {
+                        let mangled = method_fn_name(type_name, name);
+                        self.methods
+                            .insert((type_name.clone(), name.clone()), mangled);
+                    }
+                }
             }
         }
         self.emit("#include <stdint.h>");
@@ -80,8 +109,19 @@ impl CGen {
         // Forward declarations so functions can reference each other in any
         // source order (a prerequisite for multi-file module merging too).
         for item in &program.items {
-            if let Item::FnDecl { .. } = &item.node {
-                self.gen_fn_prototype(&item.node)?;
+            match &item.node {
+                Item::FnDecl { .. } => self.gen_fn_prototype(&item.node, None)?,
+                Item::ImplDecl { type_name, methods } => {
+                    for method in methods {
+                        if let Item::FnDecl { name, .. } = &method.node {
+                            self.gen_fn_prototype(
+                                &method.node,
+                                Some(&method_fn_name(type_name, name)),
+                            )?;
+                        }
+                    }
+                }
+                Item::StructDecl { .. } | Item::TypeAliasDecl { .. } => {}
             }
         }
         self.emit("");
@@ -89,8 +129,16 @@ impl CGen {
         for item in &program.items {
             match &item.node {
                 Item::FnDecl { .. } => {
-                    self.gen_fn(&item.node)?;
+                    self.gen_fn(&item.node, None)?;
                     self.emit("");
+                }
+                Item::ImplDecl { type_name, methods } => {
+                    for method in methods {
+                        if let Item::FnDecl { name, .. } = &method.node {
+                            self.gen_fn(&method.node, Some(&method_fn_name(type_name, name)))?;
+                            self.emit("");
+                        }
+                    }
                 }
                 Item::StructDecl { .. } | Item::TypeAliasDecl { .. } => {}
             }
@@ -127,6 +175,23 @@ impl CGen {
                         self.collect_type_typedefs(&param.ty, &mut typedefs)?;
                     }
                     self.collect_block_typedefs(body, &mut typedefs)?;
+                }
+                Item::ImplDecl { methods, .. } => {
+                    for method in methods {
+                        if let Item::FnDecl {
+                            params,
+                            return_type,
+                            body,
+                            ..
+                        } = &method.node
+                        {
+                            self.collect_type_typedefs(return_type, &mut typedefs)?;
+                            for param in params {
+                                self.collect_type_typedefs(&param.ty, &mut typedefs)?;
+                            }
+                            self.collect_block_typedefs(body, &mut typedefs)?;
+                        }
+                    }
                 }
             }
         }
@@ -448,7 +513,7 @@ impl CGen {
     }
 
     /// Emit a forward declaration so functions may appear in any source order.
-    fn gen_fn_prototype(&mut self, item: &Item) -> XResult<()> {
+    fn gen_fn_prototype(&mut self, item: &Item, name_override: Option<&str>) -> XResult<()> {
         let Item::FnDecl {
             name,
             params,
@@ -458,6 +523,7 @@ impl CGen {
         else {
             unreachable!();
         };
+        let name = name_override.unwrap_or(name.as_str());
         let ret = self.c_type(return_type)?;
         let params_text = if name == "main" && params.is_empty() {
             "int argc, char** argv".to_string()
@@ -474,7 +540,7 @@ impl CGen {
         Ok(())
     }
 
-    fn gen_fn(&mut self, item: &Item) -> XResult<()> {
+    fn gen_fn(&mut self, item: &Item, name_override: Option<&str>) -> XResult<()> {
         let Item::FnDecl {
             name,
             params,
@@ -484,6 +550,7 @@ impl CGen {
         else {
             unreachable!();
         };
+        let name = name_override.unwrap_or(name.as_str());
         let ret = self.c_type(return_type)?;
         let is_main = name == "main" && params.is_empty();
         let params_text = if is_main {
@@ -2458,6 +2525,19 @@ impl CGen {
                 if let Some(rendered) = self.try_vec_push_call(callee, args)? {
                     return Ok(rendered);
                 }
+                // Method call: `obj.method(args)` → if obj's type has a method
+                // `method`, dispatch to the mangled free function with obj
+                // prepended: __xlang_method_<Type>_<method>(obj, args...).
+                if let Expr::FieldAccessExpr { object, field } = &callee.node
+                    && let Some(ty_name) = self.types.type_name(object)
+                    && let Some(mangled) = self.methods.get(&(ty_name, field.clone())).cloned()
+                {
+                    let mut parts = vec![self.gen_expr(object)?];
+                    for arg in args {
+                        parts.push(self.gen_expr(arg)?);
+                    }
+                    return Ok(format!("{mangled}({})", parts.join(", ")));
+                }
                 let mut parts = Vec::new();
                 for arg in args {
                     parts.push(self.gen_expr(arg)?);
@@ -2632,6 +2712,23 @@ mod tests {
         assert!(
             c2.contains("return (strcmp(a, b) == 0);"),
             "string == should lower to strcmp: {c2}"
+        );
+    }
+
+    #[test]
+    fn lowers_method_call_to_mangled_function() {
+        // `p.length()` → __xlang_method_Point_length(p); method bodies compile
+        // as the mangled free function.
+        let c = gen_c_typed(
+            "module main\nstruct Point { x: i32 }\nimpl Point { fn sq(self: Point): i32 { return self.x * self.x } }\nfn main(): i32 { let p: Point = Point { x: 3 } return p.sq() }",
+        );
+        assert!(
+            c.contains("__xlang_method_Point_sq"),
+            "method should compile to a mangled function: {c}"
+        );
+        assert!(
+            c.contains("return __xlang_method_Point_sq(p);"),
+            "method call should dispatch to the mangled function with receiver: {c}"
         );
     }
 

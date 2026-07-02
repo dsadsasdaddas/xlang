@@ -143,6 +143,34 @@ pub fn build_index(items: &[Spanned<Item>], source: &str) -> SymbolIndex {
                     doc,
                 });
             }
+            // Index each impl method as a function named "Type.method" so it
+            // shows up in completion / symbol output.
+            Item::ImplDecl {
+                type_name, methods, ..
+            } => {
+                for method in methods {
+                    if let Item::FnDecl {
+                        name,
+                        params,
+                        return_type,
+                        ..
+                    } = &method.node
+                    {
+                        let mr = range_of(&method.span, &lines);
+                        let ps: Vec<String> = params
+                            .iter()
+                            .map(|p| format!("{}: {}", p.name, type_to_str(&p.ty)))
+                            .collect();
+                        functions.push(FunctionSymbol {
+                            name: format!("{type_name}.{name}"),
+                            params: ps,
+                            return_type: type_to_str(return_type),
+                            range: mr,
+                            doc: doc.clone(),
+                        });
+                    }
+                }
+            }
             Item::TypeAliasDecl { .. } => {}
         }
     }
