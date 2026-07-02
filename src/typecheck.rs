@@ -41,6 +41,10 @@ struct FnSig {
 struct Checker {
     scopes: Vec<HashMap<String, VarInfo>>,
     functions: HashMap<String, FnSig>,
+    /// Methods declared in `impl` blocks: (type_name, method_name) → signature
+    /// (params include `self` as the first element). Used to resolve
+    /// `obj.method(args)` calls.
+    methods: HashMap<(String, String), FnSig>,
     structs: HashMap<String, Vec<(String, CheckedType)>>,
     return_types: Vec<CheckedType>,
     diags: Diagnostics,
@@ -66,6 +70,18 @@ impl TypeMap {
             .map(|t| t.is_string())
             .unwrap_or(false)
     }
+
+    /// The named type (e.g. a user struct) of an expression, if it has one with
+    /// no type arguments. Used by codegen to dispatch method calls
+    /// (`obj.method()` → look up the method on obj's type).
+    pub fn type_name(&self, expr: &Spanned<Expr>) -> Option<String> {
+        self.0
+            .get(&(expr as *const Spanned<Expr> as usize))
+            .and_then(|t| match t {
+                CheckedType::Named { name, args } if args.is_empty() => Some(name.clone()),
+                _ => None,
+            })
+    }
 }
 
 /// Type-check `program`, returning all accumulated diagnostics (empty = clean).
@@ -79,6 +95,7 @@ pub fn check_program_typed(program: &Program) -> (Diagnostics, TypeMap) {
     let mut checker = Checker::default();
     checker.collect_functions(program);
     checker.collect_structs(program);
+    checker.collect_methods(program);
     checker.check_program(program);
     (checker.diags, TypeMap(checker.types))
 }
@@ -123,30 +140,84 @@ impl Checker {
         }
     }
 
-    fn check_program(&mut self, program: &Program) {
+    /// Register every `impl Type` method in the method table. params (including
+    /// `self`) and return type are recorded so method calls can be resolved.
+    fn collect_methods(&mut self, program: &Program) {
         for item in &program.items {
-            if let Item::FnDecl {
-                params,
-                return_type,
-                body,
-                ..
+            if let Item::ImplDecl {
+                type_name, methods, ..
             } = &item.node
             {
-                self.push_scope();
-                self.return_types.push(type_from_node(return_type));
-                for param in params {
-                    self.declare(
-                        &param.name,
-                        false,
-                        type_from_node(&param.ty),
-                        Span::unknown(0),
-                    );
+                for method in methods {
+                    if let Item::FnDecl {
+                        name,
+                        params,
+                        return_type,
+                        ..
+                    } = &method.node
+                    {
+                        self.methods.insert(
+                            (type_name.clone(), name.clone()),
+                            FnSig {
+                                params: params
+                                    .iter()
+                                    .map(|param| type_from_node(&param.ty))
+                                    .collect(),
+                                return_type: type_from_node(return_type),
+                            },
+                        );
+                    }
                 }
-                self.check_statements(&body.statements);
-                self.return_types.pop();
-                self.pop_scope();
             }
         }
+    }
+
+    fn check_program(&mut self, program: &Program) {
+        for item in &program.items {
+            match &item.node {
+                Item::FnDecl {
+                    params,
+                    return_type,
+                    body,
+                    ..
+                } => {
+                    self.check_fn_body(params, return_type, body);
+                }
+                Item::ImplDecl { methods, .. } => {
+                    for method in methods {
+                        if let Item::FnDecl {
+                            params,
+                            return_type,
+                            body,
+                            ..
+                        } = &method.node
+                        {
+                            self.check_fn_body(params, return_type, body);
+                        }
+                    }
+                }
+                Item::StructDecl { .. } | Item::TypeAliasDecl { .. } => {}
+            }
+        }
+    }
+
+    /// Declare a function/method's params and type-check its body. Shared by
+    /// top-level fns and `impl` methods (methods' first param is conventionally
+    /// `self` of the impl type, but that's just an ordinary param here).
+    fn check_fn_body(&mut self, params: &[Param], return_type: &TypeNode, body: &Block) {
+        self.push_scope();
+        self.return_types.push(type_from_node(return_type));
+        for param in params {
+            self.declare(
+                &param.name,
+                false,
+                type_from_node(&param.ty),
+                Span::unknown(0),
+            );
+        }
+        self.check_statements(&body.statements);
+        self.return_types.pop();
+        self.pop_scope();
     }
 
     fn push_scope(&mut self) {
@@ -603,6 +674,49 @@ impl Checker {
             // Fallback: a compiler builtin (lowered directly in codegen). Infer
             // its declared return type so dependent checks (e.g. `+`) work.
             return builtin_return_type(name).unwrap_or(CheckedType::Unknown);
+        }
+
+        // Method call: `obj.method(args)`. Resolve via the receiver's type.
+        if let Expr::FieldAccessExpr { object, field } = &callee.node {
+            let obj_ty = self.infer_expr(object);
+            if let CheckedType::Named { name: ty_name, .. } = &obj_ty
+                && let Some(sig) = self.methods.get(&(ty_name.clone(), field.clone())).cloned()
+            {
+                // Method params are [self, ...rest]; the call supplies the
+                // rest (self comes from the receiver).
+                let expected = sig.params.len().saturating_sub(1);
+                if args.len() != expected {
+                    self.emit(
+                        span,
+                        ErrorCode::TypeArgCount,
+                        format!(
+                            "method {ty_name:?}.{field:?} expects {expected} arguments, got {}",
+                            args.len()
+                        ),
+                    );
+                    for arg in args {
+                        self.infer_expr(arg);
+                    }
+                    return CheckedType::Unknown;
+                }
+                for (index, (arg, param_ty)) in
+                    args.iter().zip(sig.params.iter().skip(1)).enumerate()
+                {
+                    let arg_ty = self.infer_expr(arg);
+                    self.expect_assignable(
+                        param_ty,
+                        &arg_ty,
+                        &format!("argument {} for method {ty_name:?}.{field:?}", index + 1),
+                        arg.span,
+                    );
+                }
+                return sig.return_type;
+            }
+            // Not a known method: infer the receiver + args, return Unknown.
+            for arg in args {
+                self.infer_expr(arg);
+            }
+            return CheckedType::Unknown;
         }
 
         self.infer_expr(callee);
@@ -1502,6 +1616,39 @@ fn main(): i32 {
         assert!(
             first_message(&diags).contains("cannot compare String with integer literal using <"),
             "should reject String < int: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_and_rejects_method_calls() {
+        // Method call with correct arity typechecks; wrong arity is rejected.
+        let ok = check_source(
+            r#"
+module main
+struct Box { v: i32 }
+impl Box { fn add(self: Box, n: i32): i32 { return self.v + n } }
+fn main(): i32 {
+    let b: Box = Box { v: 5 }
+    return b.add(3)
+}
+"#,
+        );
+        assert!(ok.items.is_empty(), "method call should typecheck: {ok:?}");
+
+        let bad = check_source(
+            r#"
+module main
+struct Box { v: i32 }
+impl Box { fn add(self: Box, n: i32): i32 { return self.v + n } }
+fn main(): i32 {
+    let b: Box = Box { v: 5 }
+    return b.add(1, 2)
+}
+"#,
+        );
+        assert!(
+            first_message(&bad).contains("expects 1 arguments, got 2"),
+            "wrong method arity should be rejected: {bad:?}"
         );
     }
 

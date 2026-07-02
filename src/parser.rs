@@ -219,12 +219,14 @@ impl Parser {
             self.parse_type_alias()?
         } else if self.check("fn") {
             self.parse_fn_decl()?
+        } else if self.check("impl") {
+            self.parse_impl_decl()?
         } else {
             let tok = self.peek();
             return Err(Diagnostic::error(
                 ErrorCode::ParseUnknownItem,
                 self.tok_span(tok),
-                format!("expected item (struct/type/fn), got {:?}", tok.text),
+                format!("expected item (struct/type/fn/impl), got {:?}", tok.text),
             ));
         };
         Ok(Spanned::new(node, self.span_from(start)))
@@ -278,6 +280,23 @@ impl Parser {
             return_type,
             body,
         })
+    }
+
+    /// `impl Type { fn method(self: Type, ...): T { ... } ... }`. Each method
+    /// is parsed as a FnDecl item; the ImplDecl just bundles them with the
+    /// type name so codegen/typecheck can mangle and dispatch.
+    fn parse_impl_decl(&mut self) -> Result<Item, Diagnostic> {
+        self.expect("impl")?;
+        let type_name = self.expect_ident()?.text;
+        self.expect("{")?;
+        let mut methods = Vec::new();
+        while !self.check("}") {
+            let start = self.cur_start();
+            let node = self.parse_fn_decl()?;
+            methods.push(Spanned::new(node, self.span_from(start)));
+        }
+        self.expect("}")?;
+        Ok(Item::ImplDecl { type_name, methods })
     }
 
     fn parse_param(&mut self) -> Result<Param, Diagnostic> {

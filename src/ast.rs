@@ -40,6 +40,15 @@ pub enum Item {
         return_type: TypeNode,
         body: Block,
     },
+    /// `impl Type { fn method(self: Type, ...): T { ... } ... }`. Each method
+    /// is a FnDecl; codegen compiles it as a free function
+    /// `__xlang_method_<Type>_<name>` and dispatches `obj.name(args)` to it
+    /// (prepending the receiver), using the TypeMap to find the receiver type.
+    ImplDecl {
+        #[serde(rename = "typeName")]
+        type_name: String,
+        methods: Vec<Spanned<Item>>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
